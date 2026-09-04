@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linux wheel builds needed `libclang` and nobody said so.** BoringSSL's
+  binding crate build-depends on `bindgen` as well as `cmake`, so a container
+  without clang fails with "Unable to find libclang" — a message that names
+  neither the crate nor the dependency that wanted it. The release workflow now
+  installs it, and both Linux targets build on manylinux 2_28 because bindgen
+  needs libclang 9+, newer than the CentOS 7 image can offer.
+
 ### Added
 
 - **Scholarly providers**: `arxiv`, `openalex` and `crossref`, all keyless and
