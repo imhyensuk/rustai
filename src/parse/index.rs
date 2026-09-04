@@ -126,7 +126,7 @@ pub(crate) fn harvest(doc: &Doc<'_>, base: Option<&Url>, cfg: &DenoiseConfig) ->
     for &id in &doc.preorder {
         let name = doc.tag_name(id);
 
-        if let Some(level) = heading_level(&name) {
+        if let Some(level) = heading_level(name) {
             let title = text::normalize_ws(&doc.inner_text(id));
             if !title.is_empty() {
                 while headings.last().is_some_and(|(l, _, _)| *l >= level) {
@@ -257,10 +257,10 @@ fn is_titular(doc: &Doc<'_>, id: Id) -> bool {
     let mut cur = id;
     while let Some(parent) = doc.parent(cur) {
         let name = doc.tag_name(parent);
-        if matches!(name.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+        if matches!(name, "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
             return true;
         }
-        if BLOCK_TAGS.contains(&name.as_str()) {
+        if BLOCK_TAGS.contains(&name) {
             let block = doc.text_len(parent);
             return block == 0 || doc.text_len(id) * 100 >= block * TITULAR_PERCENT;
         }

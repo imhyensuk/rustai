@@ -86,7 +86,7 @@ impl<'d, 'a> Writer<'d, 'a> {
         }
         let name = self.doc.tag_name(id);
 
-        if let Some(level) = heading_level(&name) {
+        if let Some(level) = heading_level(name) {
             let inline = self.render_children_inline(id);
             let t = text::normalize_ws(&inline);
             if !t.is_empty() {
@@ -97,7 +97,7 @@ impl<'d, 'a> Writer<'d, 'a> {
             return;
         }
 
-        match name.as_str() {
+        match name {
             "" => {
                 // Bare text directly under a container.
                 if let Some(tl::Node::Raw(_)) = self.doc.node(id) {
@@ -273,7 +273,7 @@ impl<'d, 'a> Writer<'d, 'a> {
         }
         !descendants.iter().skip(1).any(|&d| {
             matches!(
-                self.doc.tag_name(d).as_str(),
+                self.doc.tag_name(d),
                 "table"
                     | "h1"
                     | "h2"

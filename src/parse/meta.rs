@@ -27,7 +27,7 @@ pub(crate) fn extract(doc: &Doc<'_>) -> Meta {
     let mut meta = Meta::default();
 
     for &id in &doc.preorder {
-        match doc.tag_name(id).as_str() {
+        match doc.tag_name(id) {
             "html" => {
                 meta.language = meta.language.take().or_else(|| clean(doc.attr(id, "lang")));
             }

@@ -79,6 +79,8 @@ pub(crate) const BLOCK_TAGS: &[&str] = &[
 pub(crate) struct Doc<'a> {
     pub(crate) dom: tl::VDom<'a>,
     parent: Vec<Option<Id>>,
+    /// Lowercase tag name per node, interned once. Empty for text and comments.
+    names: Vec<Box<str>>,
     bytes: Vec<u32>,
     text_len: Vec<u32>,
     link_len: Vec<u32>,
@@ -95,6 +97,7 @@ impl<'a> Doc<'a> {
         let n = dom.nodes().len();
 
         let mut parent = vec![None; n];
+        let mut names: Vec<Box<str>> = vec![Box::from(""); n];
         let mut seen = vec![false; n];
         let mut preorder = Vec::with_capacity(n);
 
@@ -108,6 +111,9 @@ impl<'a> Doc<'a> {
             }
             seen[id] = true;
             parent[id] = par;
+            if let Some(tag) = dom.nodes().get(id).and_then(|node| node.as_tag()) {
+                names[id] = Box::from(tag.name().as_utf8_str().to_ascii_lowercase().as_str());
+            }
             preorder.push(id);
             if let Some(node) = dom.nodes().get(id)
                 && let Some(children) = node.children()
@@ -181,7 +187,7 @@ impl<'a> Doc<'a> {
             .map(|body| text_len[body])
             .unwrap_or_else(|| preorder.first().map(|&r| text_len[r]).unwrap_or(0));
 
-        Ok(Doc { dom, parent, bytes, text_len, link_len, preorder, document_text })
+        Ok(Doc { dom, parent, names, bytes, text_len, link_len, preorder, document_text })
     }
 
     /// Does this node hold most of the document's visible text?
@@ -205,8 +211,14 @@ impl<'a> Doc<'a> {
     }
 
     /// Lowercase tag name, or `""` for text and comment nodes.
-    pub(crate) fn tag_name(&self, id: Id) -> String {
-        self.tag(id).map(|t| t.name().as_utf8_str().to_ascii_lowercase()).unwrap_or_default()
+    /// Lowercase tag name, or `""` for text and comment nodes.
+    ///
+    /// Interned during parsing: this is on nearly every hot path in the crate,
+    /// and lowercasing on each call allocated millions of short strings per
+    /// document set.
+    #[inline]
+    pub(crate) fn tag_name(&self, id: Id) -> &str {
+        self.names.get(id).map(|s| &**s).unwrap_or("")
     }
 
     #[inline]
@@ -352,15 +364,12 @@ impl<'a> Doc<'a> {
     /// text score and its children's, and reliably outscores the article it
     /// wraps.
     pub(crate) fn is_leaf_block(&self, id: Id) -> bool {
-        self.descendants(id)
-            .into_iter()
-            .skip(1)
-            .all(|d| !BLOCK_TAGS.contains(&self.tag_name(d).as_str()))
+        self.descendants(id).into_iter().skip(1).all(|d| !BLOCK_TAGS.contains(&self.tag_name(d)))
     }
 
     fn has_invisible_ancestor(&self, mut id: Id, stop: Id) -> bool {
         while let Some(p) = self.parent(id) {
-            if INVISIBLE_TAGS.contains(&self.tag_name(p).as_str()) {
+            if INVISIBLE_TAGS.contains(&self.tag_name(p)) {
                 return true;
             }
             if p == stop {

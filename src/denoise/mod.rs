@@ -139,10 +139,10 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     if name.is_empty() {
         return false; // raw text; judged through its parent
     }
-    if DROP_TAGS.contains(&name.as_str()) {
+    if DROP_TAGS.contains(&name) {
         return true;
     }
-    if cfg.drop_chrome && CHROME_TAGS.contains(&name.as_str()) {
+    if cfg.drop_chrome && CHROME_TAGS.contains(&name) {
         return true;
     }
     if !cfg.keep_tables && name == "table" {
@@ -199,7 +199,7 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     // apply this to containers that carry real text.
     if text >= cfg.min_block_len
         && doc.link_density(id) > cfg.max_link_density
-        && !matches!(name.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+        && !matches!(name, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
     {
         return true;
     }
@@ -227,7 +227,7 @@ pub(crate) fn find_content_root(doc: &Doc<'_>, cfg: &DenoiseConfig) -> Option<Id
     for &id in &doc.preorder {
         let name = doc.tag_name(id);
         if !matches!(
-            name.as_str(),
+            name,
             "p" | "pre" | "td" | "blockquote" | "article" | "section" | "div" | "li" | "dd"
         ) {
             continue;
