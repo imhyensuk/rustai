@@ -175,9 +175,22 @@ class TestIndexPages:
         assert article.kind == "article", f"{url} was read as a listing"
 
     def test_a_listing_page_works_as_a_provider(self):
-        """A site with no feed and no sitemap is still collectable."""
-        c = rustai.Client(providers=["index:https://news.ycombinator.com/"], timeout=30.0)
-        hits = c.search("programming language", strict=True)
+        """A site with no feed and no sitemap is still collectable.
+
+        The query is taken from the page rather than written down here: a
+        front page is whatever was posted today, and asserting that it holds a
+        story about any particular subject tests the news, not the provider.
+        """
+        front = "https://news.ycombinator.com/"
+        listing = rustai.Client(timeout=30.0).read([front], raise_on_error=True)[0]
+        assert listing.kind == "index", "front page was not read as a listing"
+        assert listing.links, "no links harvested from the front page"
+
+        words = [w for w in listing.links[0].text.split() if len(w) > 3]
+        assert words, f"no usable query term in {listing.links[0].text!r}"
+
+        c = rustai.Client(providers=[f"index:{front}"], timeout=30.0)
+        hits = c.search(" ".join(words[:3]), strict=True)
         assert hits
         assert all(h.url.startswith("http") for h in hits)
         assert all("index" in h.providers for h in hits)

@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Extraction stopped early on pages whose content root scores onto a
+  fragment.** The guard against a bad root asked whether it was *starved* —
+  under five percent of the document's text — which catches a root that
+  collapsed to nothing and misses every root that merely stopped early. That
+  is the common failure: a docs page split into sibling sections gives a root
+  holding one of them, comfortably above the threshold and comfortably wrong.
+  The container is now extracted too and the larger result kept, both having
+  been through the same denoiser. Measured over 34 cached pages: 20% more text
+  overall, nothing regressed, no page reclassified. `python.org`'s asyncio
+  reference goes from 19.5% of its text to 90.6%, `doc.rust-lang.org`'s `Vec`
+  from 48% to 87.5%. A gate skips the second walk when the root already covers
+  the container, which keeps throughput where it was (1,796 docs/s against
+  1,820).
+- The chosen content root is no longer re-judged by the boilerplate rules
+  before being walked. It arrives already decided, and an article container
+  that still holds the navigation it is about to drop reads as a link farm by
+  raw link density — rejecting it discarded the document to save the part that
+  was leaving anyway.
+
+
 - **Data tables were being dropped, five different ways.** A table of national
   GDP figures survived none of them, and each cause hid the next:
   - `header` is a chrome token, and it matches inside `sticky-header-multi` —

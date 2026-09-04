@@ -152,10 +152,26 @@ impl<'d, 'a> Writer<'d, 'a> {
         }
     }
 
+    /// Walk the chosen content root, without re-judging the root itself.
+    ///
+    /// The root arrives already decided: the content scorer picked it, or it
+    /// is `<body>` as a fallback. Re-asking the boilerplate heuristics about
+    /// it reopens a settled question with the wrong test — an article
+    /// container that also holds the navigation it is about to drop reads as
+    /// a link farm by raw density, and rejecting it discards the whole
+    /// document to save the part that was leaving anyway.
+    pub(crate) fn walk_root(&mut self, id: Id) {
+        self.walk_inner(id, false);
+    }
+
     /// Walk a subtree, emitting units.
     pub(crate) fn walk(&mut self, id: Id) {
+        self.walk_inner(id, true);
+    }
+
+    fn walk_inner(&mut self, id: Id, judge: bool) {
         self.stats.nodes_visited += 1;
-        if is_noise(self.doc, id, self.cfg) {
+        if judge && is_noise(self.doc, id, self.cfg) {
             self.stats.nodes_dropped += self.doc.descendants(id).len();
             return;
         }
