@@ -13,6 +13,13 @@
 use std::time::Instant;
 
 /// Peak resident set size for this process, in MiB.
+///
+/// `getrusage` is POSIX. There is a Windows equivalent in
+/// `GetProcessMemoryInfo`, but this example exists to measure the footprint
+/// claim on the platforms that claim is made about, and pulling in a second
+/// FFI surface to print one number is not worth it. CI builds every target on
+/// Windows too, so the function has to compile there regardless.
+#[cfg(unix)]
 fn peak_rss_mib() -> f64 {
     // SAFETY: `getrusage` only writes into the struct we hand it.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -22,6 +29,11 @@ fn peak_rss_mib() -> f64 {
     // macOS reports bytes; Linux reports kibibytes.
     let raw = usage.ru_maxrss as f64;
     if cfg!(target_os = "macos") { raw / (1024.0 * 1024.0) } else { raw / 1024.0 }
+}
+
+#[cfg(not(unix))]
+fn peak_rss_mib() -> f64 {
+    f64::NAN
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
