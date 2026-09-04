@@ -27,3 +27,6 @@ dist/
 .idea/
 .vscode/
 *.swp
+/rustai-report.txt
+/rustai-logs/
+/wheelhouse/

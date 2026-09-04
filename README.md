@@ -46,9 +46,15 @@ See [Benchmarks](#benchmarks) for how those numbers were produced.
 whole pipeline in a browser — offline denoising, live collection, the search
 providers, a benchmark against `trafilatura`, and a look at the TLS fingerprints.
 
+[`notebooks/colab_oneshot.ipynb`](notebooks/colab_oneshot.ipynb) is the same
+thing as a single cell: build, install, and a report covering denoising
+accuracy, throughput, live fetches, every provider, and the pipeline end to end.
+
 Until wheels are on PyPI, Colab has to build from source, and the BoringSSL
-dependency makes that a 10–20 minute first run. The notebook caches the wheel to
-Drive, so every session after the first installs in seconds.
+dependency makes that a 10–20 minute first run. Both notebooks cache the wheel
+to Drive, so every session after the first installs in seconds. They install
+`clang` and `libclang-dev` before building: BoringSSL's bindings run `bindgen`,
+which needs `libclang`, and the Colab base image does not ship it.
 
 ## Install
 
