@@ -19,6 +19,8 @@ dist/
 
 # maturin
 /wheels/
+/rustai-*.tar.gz
+/rustai-*.whl
 
 # Editors and OS
 .DS_Store
