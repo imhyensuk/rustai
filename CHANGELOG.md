@@ -27,6 +27,15 @@ All notable changes to this project are documented here. The format follows
 - `extract_many` in the Python API: batch denoising across the rayon pool with
   the GIL released. ~4x a loop over `extract`, ~30x `trafilatura`.
 
+- **Proxy rotation** (`proxies`): one client per proxy, rotated round-robin.
+  A TLS fingerprint says what a client is; an address says who it is, and
+  IP-reputation blocking is what fingerprinting cannot touch.
+- **`Retry-After` is honoured** in place of the backoff curve, capped by
+  `max_retry_after` — past which a delay is a refusal, not a wait.
+- **Cookie persistence** (`cookie_file`, `Client.save_cookies()`): clearance
+  cookies are the expensive part of getting past a bot wall, and throwing them
+  away at process exit means paying for them again.
+
 ### Fixed
 
 - **Extraction on pages that defeat the HTML parser.** `tl` does not insert the
@@ -52,6 +61,9 @@ All notable changes to this project are documented here. The format follows
   `references`, so Wikipedia citation lists survived and ate context budgets.
   High-precision terms are now conclusive at any size, since a reference list or
   comment thread runs far past the length guard that keeps the rest honest.
+- JS-gate detection used an absolute text threshold, so a 350 KB front page
+  carrying 510 characters of text — plainly an app shell — was never escalated
+  to the headless renderer. The test is now the text-to-markup ratio.
 - HTML-level redirects (`<meta http-equiv="refresh">` and `location.replace`)
   are now followed, bounded to two hops and gated on a zero delay and a small
   body. Sites that canonicalise URLs in the browser previously extracted to

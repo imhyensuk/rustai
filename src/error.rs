@@ -22,6 +22,8 @@ pub enum Error {
         url: String,
         /// The status code returned.
         status: u16,
+        /// Seconds the server asked us to wait, from its `Retry-After` header.
+        retry_after: Option<f64>,
     },
 
     /// Response body exceeded [`crate::http::FetchConfig::max_body_bytes`].
@@ -76,6 +78,16 @@ impl Error {
 
     pub(crate) fn provider(provider: &'static str, message: impl fmt::Display) -> Self {
         Error::Provider { provider: provider.to_string(), message: message.to_string() }
+    }
+
+    /// How long the server asked us to wait before trying again, if it said.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Error::Status { retry_after: Some(secs), .. } if *secs >= 0.0 => {
+                Some(std::time::Duration::from_secs_f64(*secs))
+            }
+            _ => None,
+        }
     }
 
     /// Whether retrying the same request could plausibly succeed.

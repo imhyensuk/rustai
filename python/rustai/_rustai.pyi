@@ -190,6 +190,9 @@ class Client:
         accept_language: str = "en-US,en;q=0.9",
         browser_fallback: bool = False,
         contact_email: str | None = None,
+        proxies: Sequence[str] | None = None,
+        max_retry_after: float = 60.0,
+        cookie_file: str | None = None,
         max_tokens: int = 2048,
         diversity: float = 0.35,
         include_links: bool = True,
@@ -206,6 +209,7 @@ class Client:
         self, urls: Sequence[str], *, raise_on_error: bool = False
     ) -> list[Article]: ...
     def research(self, query: str, *, max_sources: int = 5) -> Research: ...
+    def save_cookies(self) -> int: ...
 
 def extract(
     html: str,

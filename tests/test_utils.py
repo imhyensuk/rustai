@@ -133,6 +133,25 @@ class TestClientConstruction:
         )
         assert "arxiv" in repr(c)
 
+    def test_proxies_are_accepted_and_validated(self):
+        c = rustai.Client(proxies=["http://127.0.0.1:8080", "socks5://127.0.0.1:1080"])
+        assert "proxies=2" in repr(c)
+        with pytest.raises(ValueError, match="proxy"):
+            rustai.Client(proxies=["not a proxy"])
+
+    def test_cookie_file_round_trips(self, tmp_path):
+        path = tmp_path / "nested" / "jar.json"
+        c = rustai.Client(cookie_file=str(path))
+        # Nothing fetched yet, so nothing to save — but no error either.
+        assert c.save_cookies() == 0
+
+    def test_save_cookies_without_a_file_is_a_noop(self):
+        assert rustai.Client().save_cookies() == 0
+
+    def test_retry_after_cap_is_configurable(self):
+        rustai.Client(max_retry_after=0.0)
+        rustai.Client(max_retry_after=120.0)
+
     def test_unknown_impersonation_profile_rejected(self):
         with pytest.raises(ValueError, match="unknown impersonation profile"):
             rustai.Client(impersonate="netscape_2")

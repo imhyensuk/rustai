@@ -105,6 +105,14 @@ per-host spacing, a concurrency ceiling, capped bodies and backoff-on-retry are
 all on by default. Legacy encodings (EUC-KR, Shift_JIS) are decoded properly
 rather than assumed to be UTF-8.
 
+When a site answers with `Retry-After`, that is honoured in place of the
+backoff curve — a server's own number beats any we could invent — up to
+`max_retry_after`, past which a delay is really a refusal.
+
+For IP-reputation blocking, which fingerprinting cannot touch, pass `proxies`
+and requests rotate round-robin across them. `cookie_file` persists the jar, so
+a session — clearance cookies included — survives the process.
+
 HTTP redirects are followed, and so are HTML-level ones: a stub page that
 redirects through `<meta refresh>` or `location.replace` returns a perfectly
 good `200` containing no content, which is how sites that canonicalise URLs in
@@ -189,7 +197,11 @@ client = rustai.Client(
     concurrency=24,
     impersonate="chrome",       # or "firefox", "safari", "random", "chrome_143", "none"
     respect_robots=True,
+    proxies=["socks5://user:pass@host:1080"],   # rotated round-robin
+    cookie_file="~/.cache/rustai/jar.json",     # session survives the process
 )
+...
+client.save_cookies()       # write the jar back out
 
 hits = client.search("rust async runtime")           # list[SearchResult]
 pages = client.fetch([h.url for h in hits[:5]])      # list[Page]   — raw HTML
@@ -343,6 +355,14 @@ those endpoints disallow the very path they exist to serve. Pages discovered
 Impersonation exists so ordinary reading is not misclassified as abuse. It is not
 a licence to ignore a site's terms, and you are responsible for what you point
 this at.
+
+Be clear-eyed about what it does. Measured against ten sites, the profiles
+produce genuinely distinct JA3, JA3N and Akamai HTTP/2 fingerprints — but on
+sites with real bot defences (Cloudflare Enterprise, PerimeterX) turning
+impersonation on changed the outcome on **none** of them. Those blocks key on
+datacenter IP reputation and behaviour, not on the ClientHello. A fingerprint is
+necessary, not sufficient; `proxies` is the knob that addresses the rest, and
+some sites you simply should not be scraping.
 
 ## Benchmarks
 

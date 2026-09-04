@@ -42,6 +42,13 @@ pub const ROBOTS_AGENT: &str = "rustai";
 /// article) and low enough that a redirect loop costs almost nothing.
 const MAX_HTML_REDIRECTS: usize = 2;
 
+/// Above this much extracted text, a page is not an empty shell.
+const MAX_STATIC_TEXT: usize = 2_000;
+
+/// One character of text per this many bytes of markup is the floor below which
+/// a page is presumed to be rendered client-side.
+const TEXT_TO_MARKUP_FLOOR: usize = 200;
+
 /// Content types we are willing to parse as a document.
 const TEXTUAL: &[&str] = &[
     "text/html",
@@ -116,6 +123,16 @@ pub struct FetchConfig {
     pub accept_language: String,
     /// Escalate JS-gated pages to headless Chrome. Needs the `browser` feature.
     pub browser_fallback: bool,
+    /// Proxies to route requests through, rotated round-robin.
+    ///
+    /// The only real answer to IP-reputation blocking: a TLS fingerprint says
+    /// what your client is, and an address says who it is. Accepts `http://`,
+    /// `https://` and `socks5://` URLs, with optional `user:pass@`.
+    pub proxies: Vec<String>,
+    /// Honour a `Retry-After` header, up to this long. Set to zero to ignore it.
+    pub max_retry_after: Duration,
+    /// File to persist cookies to, so a session survives the process.
+    pub cookie_file: Option<std::path::PathBuf>,
 }
 
 impl Default for FetchConfig {
@@ -134,6 +151,9 @@ impl Default for FetchConfig {
             impersonate: Impersonate::Chrome,
             accept_language: "en-US,en;q=0.9".to_string(),
             browser_fallback: false,
+            proxies: Vec::new(),
+            max_retry_after: Duration::from_secs(60),
+            cookie_file: None,
         }
     }
 }
@@ -160,7 +180,14 @@ pub struct Page {
 /// A pooled, polite, fingerprint-aware HTTP client.
 #[derive(Clone)]
 pub struct Fetcher {
-    client: wreq::Client,
+    /// One client per proxy, or a single direct client. Rotated per request.
+    clients: Arc<Vec<wreq::Client>>,
+    next_client: Arc<std::sync::atomic::AtomicUsize>,
+    jar: Option<Arc<wreq::cookie::Jar>>,
+    /// Hosts this fetcher has touched. The cookie jar indexes by domain but
+    /// does not expose that key, so a host-only cookie — which is most session
+    /// cookies — cannot be attributed on the way back out without this.
+    visited: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
     cfg: Arc<FetchConfig>,
     gate: Arc<Semaphore>,
     robots: Arc<Mutex<HashMap<String, Arc<Robots>>>>,
@@ -184,40 +211,87 @@ impl Fetcher {
         if cfg.concurrency == 0 {
             return Err(Error::Config("concurrency must be at least 1".into()));
         }
-        let mut builder = wreq::Client::builder()
-            .timeout(cfg.timeout)
-            .connect_timeout(cfg.connect_timeout)
-            .redirect(wreq::redirect::Policy::limited(cfg.max_redirects))
-            .pool_max_idle_per_host(cfg.concurrency.min(32))
-            .cookie_store(true)
-            .referer(true)
-            .gzip(true)
-            .brotli(true)
-            .deflate(true)
-            .zstd(true);
+        let jar = cfg.cookie_file.as_ref().map(|path| Arc::new(load_jar(path)));
 
-        builder = apply_impersonation(builder, &cfg.impersonate)?;
+        let build_one = |proxy: Option<&str>| -> Result<wreq::Client> {
+            let mut builder = wreq::Client::builder()
+                .timeout(cfg.timeout)
+                .connect_timeout(cfg.connect_timeout)
+                .redirect(wreq::redirect::Policy::limited(cfg.max_redirects))
+                .pool_max_idle_per_host(cfg.concurrency.min(32))
+                .referer(true)
+                .gzip(true)
+                .brotli(true)
+                .deflate(true)
+                .zstd(true);
 
-        let mut headers = wreq::header::HeaderMap::new();
-        if let Ok(v) = wreq::header::HeaderValue::from_str(&cfg.accept_language) {
-            headers.insert(wreq::header::ACCEPT_LANGUAGE, v);
-        }
-        if matches!(cfg.impersonate, Impersonate::None) {
-            headers.insert(
-                wreq::header::USER_AGENT,
-                wreq::header::HeaderValue::from_static(DEFAULT_USER_AGENT),
-            );
-        }
-        builder = builder.default_headers(headers);
+            builder = match &jar {
+                Some(jar) => builder.cookie_provider(jar.clone()),
+                None => builder.cookie_store(true),
+            };
+            builder = apply_impersonation(builder, &cfg.impersonate)?;
 
-        let client = builder.build().map_err(|e| Error::Config(e.to_string()))?;
+            if let Some(proxy) = proxy {
+                let proxy = wreq::Proxy::all(proxy)
+                    .map_err(|e| Error::Config(format!("invalid proxy `{proxy}`: {e}")))?;
+                builder = builder.proxy(proxy);
+            }
+
+            let mut headers = wreq::header::HeaderMap::new();
+            if let Ok(v) = wreq::header::HeaderValue::from_str(&cfg.accept_language) {
+                headers.insert(wreq::header::ACCEPT_LANGUAGE, v);
+            }
+            if matches!(cfg.impersonate, Impersonate::None) {
+                headers.insert(
+                    wreq::header::USER_AGENT,
+                    wreq::header::HeaderValue::from_static(DEFAULT_USER_AGENT),
+                );
+            }
+            builder = builder.default_headers(headers);
+            builder.build().map_err(|e| Error::Config(e.to_string()))
+        };
+
+        let clients = if cfg.proxies.is_empty() {
+            vec![build_one(None)?]
+        } else {
+            cfg.proxies.iter().map(|p| build_one(Some(p))).collect::<Result<Vec<_>>>()?
+        };
+
         Ok(Fetcher {
-            client,
+            clients: Arc::new(clients),
+            next_client: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            jar,
+            visited: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
             gate: Arc::new(Semaphore::new(cfg.concurrency)),
             cfg: Arc::new(cfg),
             robots: Arc::new(Mutex::new(HashMap::new())),
             last_hit: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// The next client in the rotation.
+    ///
+    /// Round-robin rather than random: with a small proxy pool, randomness
+    /// clusters, and clustering on one address is exactly what gets it banned.
+    fn client(&self) -> &wreq::Client {
+        if self.clients.len() == 1 {
+            return &self.clients[0];
+        }
+        let i = self.next_client.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        &self.clients[i % self.clients.len()]
+    }
+
+    /// Write the cookie jar to [`FetchConfig::cookie_file`].
+    ///
+    /// Clearance cookies are the expensive part of getting through a bot wall;
+    /// throwing them away when the process exits means paying for them again.
+    pub fn save_cookies(&self) -> Result<usize> {
+        let (Some(jar), Some(path)) = (&self.jar, &self.cfg.cookie_file) else { return Ok(0) };
+        let hosts: Vec<String> = match self.visited.lock() {
+            Ok(v) => v.iter().cloned().collect(),
+            Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+        };
+        save_jar(jar, &hosts, path)
     }
 
     /// The configuration this fetcher was built with.
@@ -316,8 +390,15 @@ impl Fetcher {
                 Ok(page) => return Ok(page),
                 Err(e) if e.is_retryable() && attempt < self.cfg.retries => {
                     // Retrying a 429 immediately is how a client turns a soft
-                    // limit into a hard block.
-                    let wait = self.cfg.retry_backoff * 2u32.pow(attempt);
+                    // limit into a hard block. When the server says how long to
+                    // wait, that beats any backoff curve we could invent — but
+                    // an hour-long hint is a refusal, not a delay, so it is
+                    // capped and otherwise treated as a failure.
+                    let wait = match e.retry_after() {
+                        Some(hint) if hint <= self.cfg.max_retry_after => hint,
+                        Some(_) => return Err(e),
+                        None => self.cfg.retry_backoff * 2u32.pow(attempt),
+                    };
                     tokio::time::sleep(wait).await;
                     attempt += 1;
                 }
@@ -328,7 +409,7 @@ impl Fetcher {
 
     async fn get_once(&self, url: &Url) -> Result<Page> {
         let resp =
-            self.client.get(url.as_str()).send().await.map_err(|e| Error::network(url, e))?;
+            self.client().get(url.as_str()).send().await.map_err(|e| Error::network(url, e))?;
 
         let status = resp.status().as_u16();
         let final_url = resp.uri().to_string();
@@ -339,7 +420,12 @@ impl Fetcher {
             .map(str::to_string);
 
         if !(200..300).contains(&status) {
-            return Err(Error::Status { url: url.to_string(), status });
+            let retry_after = resp
+                .headers()
+                .get(wreq::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after);
+            return Err(Error::Status { url: url.to_string(), status, retry_after });
         }
         if let Some(ct) = &content_type {
             let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
@@ -397,7 +483,7 @@ impl Fetcher {
             return cached.clone();
         }
         let robots_url = format!("{key}/robots.txt");
-        let parsed = match self.client.get(&robots_url).send().await {
+        let parsed = match self.client().get(&robots_url).send().await {
             Ok(resp) if resp.status().is_success() => match resp.text().await {
                 Ok(body) => Robots::parse(&body, ROBOTS_AGENT),
                 Err(_) => Robots::allow_all(),
@@ -412,6 +498,9 @@ impl Fetcher {
     /// Space requests to one host apart, honouring `Crawl-delay` when larger.
     async fn pace(&self, url: &Url, crawl_delay: Option<f64>) {
         let host = url.host_str().unwrap_or_default().to_string();
+        if let Ok(mut visited) = self.visited.lock() {
+            visited.insert(host.clone());
+        }
         let mut delay = self.cfg.per_host_delay;
         if self.cfg.respect_crawl_delay
             && let Some(d) = crawl_delay
@@ -491,6 +580,80 @@ fn named_profile(name: &str) -> Result<wreq_util::Profile> {
                  `random`, or a versioned name such as `chrome_143`"
             ))
         })
+}
+
+/// Parse a `Retry-After` value into seconds.
+///
+/// Only the delta-seconds form. The HTTP-date form is rare in practice and
+/// parsing it would mean carrying a date library for one header; an unparsed
+/// value simply falls back to exponential backoff.
+fn parse_retry_after(value: &str) -> Option<f64> {
+    let secs: f64 = value.trim().parse().ok()?;
+    secs.is_finite().then_some(secs.max(0.0))
+}
+
+/// One persisted cookie, with the host it belongs to.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredCookie {
+    name: String,
+    value: String,
+    /// Host the cookie was collected from.
+    host: String,
+    path: String,
+    /// `Domain` attribute, when the cookie carried one. Absent means host-only,
+    /// and reloading must keep it that way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
+}
+
+/// Read a cookie jar from disk. A missing or unreadable file yields an empty
+/// jar: a lost session is a slow start, never an error.
+fn load_jar(path: &std::path::Path) -> wreq::cookie::Jar {
+    let jar = wreq::cookie::Jar::default();
+    let Ok(raw) = std::fs::read_to_string(path) else { return jar };
+    let Ok(stored) = serde_json::from_str::<Vec<StoredCookie>>(&raw) else { return jar };
+    for c in stored {
+        let uri = format!("https://{}{}", c.host, c.path);
+        let mut cookie = format!("{}={}; Path={}", c.name, c.value, c.path);
+        if let Some(domain) = &c.domain {
+            cookie.push_str(&format!("; Domain={domain}"));
+        }
+        jar.add(cookie.as_str(), uri.as_str());
+    }
+    jar
+}
+
+/// Write a cookie jar to disk, returning how many cookies were saved.
+fn save_jar(jar: &wreq::cookie::Jar, hosts: &[String], path: &std::path::Path) -> Result<usize> {
+    // Asking the jar what it would send to each host we visited is the only way
+    // to recover a host-only cookie's owner: `get_all` returns the cookies but
+    // not the domain key they were filed under.
+    let mut seen = std::collections::HashSet::new();
+    let mut stored: Vec<StoredCookie> = Vec::new();
+    for host in hosts {
+        for c in jar.matches(format!("https://{host}/").as_str()) {
+            let cookie = StoredCookie {
+                name: c.name().to_string(),
+                value: c.value().to_string(),
+                host: host.clone(),
+                path: c.path().unwrap_or("/").to_string(),
+                domain: c.domain().map(str::to_string),
+            };
+            if seen.insert((cookie.host.clone(), cookie.name.clone(), cookie.path.clone())) {
+                stored.push(cookie);
+            }
+        }
+    }
+    let json = serde_json::to_string_pretty(&stored)
+        .map_err(|e| Error::Config(format!("could not serialise cookies: {e}")))?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, json)
+        .map_err(|e| Error::Config(format!("could not write {}: {e}", path.display())))?;
+    Ok(stored.len())
 }
 
 /// Reject anything that is not an absolute http(s) URL.
@@ -637,12 +800,24 @@ pub fn needs_javascript(page: &Page) -> bool {
         return true;
     };
     let text_len = crate::text::visible_len(&article.text);
-    if text_len > 400 {
+
+    // Plenty of text: whatever else the page is doing, we already have it.
+    if text_len > MAX_STATIC_TEXT {
         return false;
     }
+
+    // Markup carrying essentially no text. An absolute floor misses the common
+    // case — a 350 KB front page yielding 510 characters clears any fixed
+    // threshold while plainly being an app shell — so the test is the ratio.
+    // Real pages run percent-level text-to-markup; a shell runs a tenth of that.
+    let starved = text_len.saturating_mul(TEXT_TO_MARKUP_FLOOR) < html.len();
+    if text_len < 120 || starved {
+        return true;
+    }
+
     let lower = html.to_lowercase();
     let spa_markers = ["__next_data__", "id=\"root\"", "id=\"app\"", "ng-app", "data-reactroot"];
-    text_len < 120 || spa_markers.iter().any(|m| lower.contains(m))
+    spa_markers.iter().any(|m| lower.contains(m))
 }
 
 #[cfg(test)]
@@ -699,6 +874,77 @@ mod tests {
             };
             assert!(Fetcher::with_config(cfg).is_ok(), "{mode} failed to build");
         }
+    }
+
+    #[test]
+    fn retry_after_is_parsed_and_capped() {
+        assert_eq!(parse_retry_after("120"), Some(120.0));
+        assert_eq!(parse_retry_after("  0 "), Some(0.0));
+        assert_eq!(parse_retry_after("-5"), Some(0.0));
+        // The HTTP-date form is not parsed; backoff takes over.
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(parse_retry_after(""), None);
+
+        let e =
+            Error::Status { url: "https://x.dev/".into(), status: 429, retry_after: Some(30.0) };
+        assert_eq!(e.retry_after(), Some(Duration::from_secs(30)));
+        assert!(e.is_retryable());
+        let none = Error::Status { url: "https://x.dev/".into(), status: 429, retry_after: None };
+        assert_eq!(none.retry_after(), None);
+    }
+
+    #[test]
+    fn proxies_build_one_client_each() {
+        let cfg = FetchConfig {
+            proxies: vec!["http://127.0.0.1:8080".into(), "socks5://127.0.0.1:1080".into()],
+            ..Default::default()
+        };
+        let fetcher = Fetcher::with_config(cfg).expect("proxied client");
+        assert_eq!(fetcher.clients.len(), 2);
+        // Round-robin, so a small pool cannot cluster on one address.
+        let first = fetcher.client() as *const _;
+        let second = fetcher.client() as *const _;
+        assert_ne!(first, second);
+        assert_eq!(fetcher.client() as *const _, first);
+    }
+
+    #[test]
+    fn an_invalid_proxy_is_rejected_at_build_time() {
+        let cfg = FetchConfig { proxies: vec!["not a proxy".into()], ..Default::default() };
+        assert!(Fetcher::with_config(cfg).is_err());
+    }
+
+    #[test]
+    fn cookies_survive_a_round_trip_through_disk() {
+        let dir = std::env::temp_dir().join(format!("rustai-cookies-{}", std::process::id()));
+        let path = dir.join("jar.json");
+        let _ = std::fs::remove_file(&path);
+
+        let jar = wreq::cookie::Jar::default();
+        // A domain cookie and a host-only one: the latter is what most session
+        // cookies actually are, and it has no Domain attribute to save.
+        jar.add("cf_clearance=abc123; Domain=example.com; Path=/", "https://example.com/");
+        jar.add("session=xyz789; Path=/", "https://example.com/");
+        let hosts = vec!["example.com".to_string()];
+        assert_eq!(save_jar(&jar, &hosts, &path).unwrap(), 2);
+
+        let reloaded = load_jar(&path);
+        assert!(reloaded.contains("session", "https://example.com/"), "host-only cookie lost");
+        assert!(reloaded.contains("cf_clearance", "https://example.com/"), "cookie was lost");
+        assert_eq!(
+            reloaded.get("cf_clearance", "https://example.com/").map(|c| c.value().to_string()),
+            Some("abc123".to_string())
+        );
+
+        // A missing file is a slow start, not an error.
+        assert_eq!(load_jar(&dir.join("nope.json")).len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fetcher_without_a_cookie_file_saves_nothing() {
+        let fetcher = Fetcher::new().unwrap();
+        assert_eq!(fetcher.save_cookies().unwrap(), 0);
     }
 
     #[test]
@@ -818,5 +1064,47 @@ mod tests {
             "Real prose that a reader can actually read. ".repeat(20)
         );
         assert!(!needs_javascript(&page(&real)));
+    }
+}
+
+#[cfg(test)]
+mod js_gate_tests {
+    use super::*;
+
+    fn page(body: String) -> Page {
+        Page {
+            url: "https://x.dev/".into(),
+            final_url: "https://x.dev/".into(),
+            status: 200,
+            content_type: Some("text/html".into()),
+            body,
+            elapsed_ms: 0,
+            rendered: false,
+        }
+    }
+
+    /// Modelled on a real front page whose stories render client-side: ~350 KB
+    /// of markup carrying ~500 characters of text. An absolute text threshold
+    /// waves that through — 500 clears any sane floor — while the ratio does
+    /// not. Index detection cannot rescue such a page either: there is nothing
+    /// in the HTML to index.
+    #[test]
+    fn a_client_rendered_front_page_is_flagged() {
+        let shell = format!(
+            "<html><body><nav>{}</nav><main></main><script>{}</script></body></html>",
+            "<a href=\"/section\">Section link</a>".repeat(20),
+            "x".repeat(340_000)
+        );
+        assert!(needs_javascript(&page(shell)));
+    }
+
+    /// The same size of page, but the markup actually carries the article.
+    #[test]
+    fn a_large_real_article_is_not_flagged() {
+        let real = format!(
+            "<html><body><article><h1>T</h1><p>{}</p></article></body></html>",
+            "Real prose that a reader can actually read and act on. ".repeat(400)
+        );
+        assert!(!needs_javascript(&page(real)));
     }
 }

@@ -183,6 +183,44 @@ class TestIndexPages:
         assert all("index" in h.providers for h in hits)
 
 
+class TestSessionPersistence:
+    def test_cookies_survive_a_new_client(self, tmp_path):
+        """Clearance cookies are the expensive part of getting past a bot wall."""
+        path = tmp_path / "jar.json"
+        first = rustai.Client(cookie_file=str(path), respect_robots=False, timeout=30.0)
+        first.fetch(
+            ["https://httpbin.org/cookies/set?session=abc123"], raise_on_error=True
+        )
+        assert first.save_cookies() >= 1
+
+        second = rustai.Client(cookie_file=str(path), respect_robots=False, timeout=30.0)
+        page = second.fetch(["https://httpbin.org/cookies"], raise_on_error=True)[0]
+        assert "abc123" in page.body, page.body
+
+
+class TestImpersonation:
+    @pytest.mark.parametrize("mode", ["chrome", "firefox", "safari", "none"])
+    def test_each_profile_presents_a_distinct_tls_fingerprint(self, mode):
+        """The point of the layer: the ClientHello, not just the User-Agent."""
+        import json
+
+        c = rustai.Client(impersonate=mode, respect_robots=False, timeout=30.0)
+        page = c.fetch(["https://tls.browserleaks.com/json"], raise_on_error=True)[0]
+        data = json.loads(page.body)
+        assert data["ja3_hash"]
+        assert data["akamai_hash"]
+
+    def test_profiles_differ_from_each_other(self):
+        import json
+
+        seen = set()
+        for mode in ["chrome", "firefox", "none"]:
+            c = rustai.Client(impersonate=mode, respect_robots=False, timeout=30.0)
+            page = c.fetch(["https://tls.browserleaks.com/json"], raise_on_error=True)[0]
+            seen.add(json.loads(page.body)["ja3_hash"])
+        assert len(seen) == 3, "profiles are not producing distinct fingerprints"
+
+
 class TestResearch:
     def test_end_to_end(self, client):
         result = client.research("what is the BM25 ranking function", max_sources=3)

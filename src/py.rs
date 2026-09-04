@@ -637,6 +637,9 @@ impl PyClient {
         accept_language = "en-US,en;q=0.9",
         browser_fallback = false,
         contact_email = None,
+        proxies = None,
+        max_retry_after = 60.0,
+        cookie_file = None,
         max_tokens = 2048,
         diversity = 0.35,
         include_links = true,
@@ -658,6 +661,9 @@ impl PyClient {
         accept_language: &str,
         browser_fallback: bool,
         contact_email: Option<String>,
+        proxies: Option<Vec<String>>,
+        max_retry_after: f64,
+        cookie_file: Option<String>,
         max_tokens: usize,
         diversity: f32,
         include_links: bool,
@@ -693,12 +699,16 @@ impl PyClient {
             impersonate: Impersonate::parse(impersonate)?,
             accept_language: accept_language.to_string(),
             browser_fallback,
+            proxies: proxies.unwrap_or_default(),
+            max_retry_after: std::time::Duration::from_secs_f64(max_retry_after.max(0.0)),
+            cookie_file: cookie_file.map(std::path::PathBuf::from),
             ..Default::default()
         };
         let summary = format!(
             "Client(providers={:?}, concurrency={concurrency}, impersonate={impersonate:?}, \
-             respect_robots={respect_robots}, max_tokens={max_tokens})",
-            providers.iter().map(Provider::name).collect::<Vec<_>>()
+             respect_robots={respect_robots}, proxies={}, max_tokens={max_tokens})",
+            providers.iter().map(Provider::name).collect::<Vec<_>>(),
+            fetch.proxies.len()
         );
 
         let pipeline = Pipeline::builder()
@@ -772,6 +782,15 @@ impl PyClient {
             runtime().map(|rt| rt.block_on(self.pipeline.research(query, max_sources)))
         })?;
         Ok(PyResearch { inner })
+    }
+
+    /// Write the cookie jar to the `cookie_file` this client was built with.
+    ///
+    /// Returns how many cookies were saved, or 0 when no file was configured.
+    /// Clearance cookies are the expensive part of getting through a bot wall;
+    /// saving them means not paying for them again next run.
+    fn save_cookies(&self) -> PyResult<usize> {
+        Ok(self.pipeline.fetcher().save_cookies()?)
     }
 
     fn __repr__(&self) -> String {
@@ -933,6 +952,9 @@ fn research(
         "en-US,en;q=0.9",
         false,
         contact_email,
+        None,
+        60.0,
+        None,
         max_tokens,
         0.35,
         true,
