@@ -40,6 +40,16 @@ Rust:
 
 See [Benchmarks](#benchmarks) for how those numbers were produced.
 
+## Try it in Colab
+
+[`notebooks/colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb) runs the
+whole pipeline in a browser — offline denoising, live collection, the search
+providers, a benchmark against `trafilatura`, and a look at the TLS fingerprints.
+
+Until wheels are on PyPI, Colab has to build from source, and the BoringSSL
+dependency makes that a 10–20 minute first run. The notebook caches the wheel to
+Drive, so every session after the first installs in seconds.
+
 ## Install
 
 ```bash
