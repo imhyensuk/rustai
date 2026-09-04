@@ -31,7 +31,7 @@ use robots::Robots;
 
 /// Default identity when impersonation is off, or for the `robots.txt` lookup.
 pub const DEFAULT_USER_AGENT: &str =
-    concat!("rustai/", env!("CARGO_PKG_VERSION"), " (+https://github.com/imhyeonsuk/rustai)");
+    concat!("rustai/", env!("CARGO_PKG_VERSION"), " (+https://github.com/imhyensuk/rustai)");
 
 /// The token we match `robots.txt` groups against.
 pub const ROBOTS_AGENT: &str = "rustai";

@@ -12,7 +12,7 @@ result = rustai.research("how does BM25 handle document length", max_sources=5, 
 print(result.markdown)   # cited, deduplicated, ranked Markdown — ready to prompt
 ```
 
-[![CI](https://github.com/imhyeonsuk/rustai/actions/workflows/ci.yml/badge.svg)](https://github.com/imhyeonsuk/rustai/actions/workflows/ci.yml)
+[![CI](https://github.com/imhyensuk/rustai/actions/workflows/ci.yml/badge.svg)](https://github.com/imhyensuk/rustai/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/rustai.svg)](https://pypi.org/project/rustai/)
 [![crates.io](https://img.shields.io/crates/v/rustai-core.svg)](https://crates.io/crates/rustai-core)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)

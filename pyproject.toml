@@ -26,10 +26,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage      = "https://github.com/imhyeonsuk/rustai"
-Repository    = "https://github.com/imhyeonsuk/rustai"
-Issues        = "https://github.com/imhyeonsuk/rustai/issues"
-Changelog     = "https://github.com/imhyeonsuk/rustai/blob/main/CHANGELOG.md"
+Homepage      = "https://github.com/imhyensuk/rustai"
+Repository    = "https://github.com/imhyensuk/rustai"
+Issues        = "https://github.com/imhyensuk/rustai/issues"
+Changelog     = "https://github.com/imhyensuk/rustai/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "maturin>=1.7,<2.0"]
