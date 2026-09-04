@@ -471,3 +471,45 @@ mod tests {
         assert!(out.iter().all(|r| r.as_ref().is_ok_and(|a| !a.units.is_empty())));
     }
 }
+
+#[cfg(test)]
+mod superscript_tests {
+    use super::*;
+
+    fn md(fragment: &str) -> String {
+        let html = format!("<article><p>{} {fragment}</p></article>", "Prose. ".repeat(12));
+        extract(&html, None).unwrap().markdown
+    }
+
+    #[test]
+    fn exponents_and_units_survive() {
+        assert!(md("6.02 × 10<sup>23</sup> mol<sup>-1</sup>").contains("10^23 mol^-1"));
+        assert!(md("area is 5 m<sup>2</sup>").contains("m^2"));
+    }
+
+    #[test]
+    fn ordinals_read_naturally() {
+        assert!(md("the 1<sup>st</sup> release").contains("1st release"));
+    }
+
+    #[test]
+    fn citation_markers_are_dropped() {
+        for marker in [
+            r#"<sup class="reference">[1]</sup>"#,
+            r##"<sup><a href="#cite_note-1">[12]</a></sup>"##,
+            "<sup>[3]</sup>",
+        ] {
+            let out = md(&format!("A claim{marker} follows."));
+            assert!(out.contains("A claim follows.") || out.contains("A claim  follows."), "{out}");
+            assert!(!out.contains('['), "marker survived: {out}");
+        }
+    }
+
+    #[test]
+    fn attribute_entities_are_decoded() {
+        let html = r#"<html><head><meta property="og:title" content="Steve Irwin&#x27;s family &amp; friends"></head>
+            <body><article><p>Body text long enough to keep around here.</p></article></body></html>"#;
+        let art = extract(html, None).unwrap();
+        assert_eq!(art.meta.title.as_deref(), Some("Steve Irwin's family & friends"));
+    }
+}

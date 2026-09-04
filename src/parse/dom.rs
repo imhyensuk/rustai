@@ -289,11 +289,16 @@ impl<'a> Doc<'a> {
         out
     }
 
-    /// Value of an attribute, lowercased.
+    /// Value of an attribute, with HTML entities decoded.
+    ///
+    /// Attribute values carry entities as readily as text does — `og:title` and
+    /// `alt` especially — and leaving them raw puts `&#x27;` in front of a
+    /// reader.
     pub(crate) fn attr(&self, id: Id, key: &str) -> Option<String> {
         let tag = self.tag(id)?;
         let value = tag.attributes().get(key)??;
-        Some(value.as_utf8_str().into_owned())
+        let raw = value.as_utf8_str();
+        Some(decode_entities(&raw).into_owned())
     }
 
     /// `class` and `id` joined, lowercased — the string the noise regexes match.
@@ -312,6 +317,17 @@ impl<'a> Doc<'a> {
                 if let Some(Some(v)) = tag.attributes().get(key) {
                     sig.push_str(&v.as_utf8_str().to_ascii_lowercase());
                     sig.push(' ');
+                }
+            }
+            // Ad slots carry their purpose in attribute *names* — `data-ad-unit`,
+            // `data-ad-client`, `data-google-query-id` — far more reliably than
+            // in any class. Surfacing that as a token lets the same vocabulary
+            // catch them.
+            for (key, _) in tag.attributes().iter() {
+                let key = key.to_ascii_lowercase();
+                if key.starts_with("data-ad") || key.starts_with("data-google-ad") {
+                    sig.push_str("advertisement ");
+                    break;
                 }
             }
         }

@@ -30,6 +30,20 @@ pub const DROP_TAGS: &[&str] = &[
 /// Tags that are boilerplate by definition in the HTML5 outline.
 pub const CHROME_TAGS: &[&str] = &["nav", "footer", "aside", "menu"];
 
+/// Class/id tokens that are never content, and that no positive marker
+/// outranks.
+///
+/// Split out from [`CONCLUSIVE`] because "positive wins ties" is the wrong
+/// rule here: `class="sponsored-content"` matches both vocabularies, and it is
+/// an advertisement. Commercial markers are unambiguous in a way that
+/// structural ones ("comments", "related") are not.
+static ABSOLUTE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(^|[-_\s])(ads?|adbox|adslot|adunit|advert|adverts|advertising|advertisement|advertisements|sponsors?|sponsored|sponsorship|promos?|promoted|promotions?|banners?|adsense|adsbygoogle|doubleclick|googlead|googleads|taboola|outbrain|revcontent|zergnet|mgid|criteo|popups?|interstitials?|paywall|cookies?|consent|gdpr)([-_\s]|$)",
+    )
+    .expect("static absolute regex")
+});
+
 /// Class/id tokens that justify dropping a subtree **at any size**.
 ///
 /// The vocabulary below is high-precision: nothing here is ever the article. A
@@ -124,7 +138,7 @@ pub(crate) fn class_weight(doc: &Doc<'_>, id: Id) -> f32 {
         return 0.0;
     }
     let mut w = 0.0;
-    if NEGATIVE.is_match(&sig) || CONCLUSIVE.is_match(&sig) {
+    if NEGATIVE.is_match(&sig) || CONCLUSIVE.is_match(&sig) || ABSOLUTE.is_match(&sig) {
         w -= 25.0;
     }
     if POSITIVE.is_match(&sig) {
@@ -183,6 +197,10 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
 
     if cfg.drop_by_class {
         let sig = doc.signature(id);
+        // Commercial markers outrank everything, including a positive one.
+        if ABSOLUTE.is_match(&sig) {
+            return true;
+        }
         // High-precision vocabulary: never the article, whatever its size.
         if CONCLUSIVE.is_match(&sig) && !POSITIVE.is_match(&sig) {
             return true;
@@ -387,6 +405,48 @@ mod tests {
                 is_noise(&doc, id_of(&doc, sig), &DenoiseConfig::default()),
                 "class {sig:?} was not recognised"
             );
+        }
+    }
+
+    #[test]
+    fn commercial_markers_outrank_a_positive_class() {
+        // `sponsored-content` matches both vocabularies. It is an advert.
+        let prose = "Real article prose that runs past any length filter here. ".repeat(30);
+        for sig in ["sponsored-content", "ad-content", "promoted-story", "adsbygoogle"] {
+            let html = format!(
+                r#"<html><body><article class="post"><p>{prose}</p></article>
+                   <div class="{sig}"><p>{prose}</p></div></body></html>"#
+            );
+            let doc = Doc::parse(&html).unwrap();
+            assert!(
+                is_noise(&doc, id_of(&doc, sig), &DenoiseConfig::default()),
+                "{sig:?} survived"
+            );
+        }
+    }
+
+    #[test]
+    fn ad_tech_attributes_are_recognised() {
+        let prose = "Real article prose that runs past any length filter here. ".repeat(30);
+        let html = format!(
+            r#"<html><body><article class="post"><p>{prose}</p></article>
+               <div data-ad-unit="/1234/banner"><p>banner copy</p></div>
+               <div data-ad-client="ca-pub-1"><p>more banner copy</p></div>
+               </body></html>"#
+        );
+        let doc = Doc::parse(&html).unwrap();
+        let cfg = DenoiseConfig::default();
+        let ads: Vec<Id> = doc
+            .preorder
+            .iter()
+            .copied()
+            .filter(|&i| {
+                doc.attr(i, "data-ad-unit").is_some() || doc.attr(i, "data-ad-client").is_some()
+            })
+            .collect();
+        assert_eq!(ads.len(), 2);
+        for ad in ads {
+            assert!(is_noise(&doc, ad, &cfg), "ad-tech attribute not recognised");
         }
     }
 

@@ -30,6 +30,81 @@ const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
 /// majority of inline nodes never pay for the descendant walk.
 const INLINE_INSPECT_BYTES: u32 = 2048;
 
+/// Language names accepted from a bare `class="rust"`-style attribute.
+///
+/// A whitelist rather than a pattern, because that attribute is shared with
+/// styling hooks: `hljs`, `notranslate` and `prettyprint` all look exactly like
+/// a language name to anything less strict.
+const KNOWN_LANGUAGES: &[&str] = &[
+    "bash",
+    "c",
+    "clojure",
+    "cpp",
+    "cs",
+    "csharp",
+    "css",
+    "dart",
+    "diff",
+    "dockerfile",
+    "elixir",
+    "elm",
+    "erlang",
+    "fsharp",
+    "go",
+    "graphql",
+    "groovy",
+    "haskell",
+    "hcl",
+    "html",
+    "ini",
+    "java",
+    "javascript",
+    "js",
+    "json",
+    "json5",
+    "jsx",
+    "julia",
+    "kotlin",
+    "latex",
+    "less",
+    "lisp",
+    "lua",
+    "makefile",
+    "markdown",
+    "matlab",
+    "nginx",
+    "nim",
+    "objectivec",
+    "ocaml",
+    "perl",
+    "php",
+    "powershell",
+    "protobuf",
+    "python",
+    "r",
+    "ruby",
+    "rust",
+    "sass",
+    "scala",
+    "scss",
+    "shell",
+    "sh",
+    "sql",
+    "svelte",
+    "swift",
+    "terraform",
+    "toml",
+    "ts",
+    "tsx",
+    "typescript",
+    "vim",
+    "vue",
+    "xml",
+    "yaml",
+    "zig",
+    "zsh",
+];
+
 /// Options that change what ends up in the Markdown.
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
@@ -235,24 +310,60 @@ impl<'d, 'a> Writer<'d, 'a> {
     }
 
     fn emit_code(&mut self, id: Id) {
-        let lang = self
-            .doc
-            .descendants(id)
-            .into_iter()
-            .find_map(|d| self.doc.attr(d, "class"))
-            .and_then(|c| {
-                c.split_whitespace()
-                    .find_map(|c| c.strip_prefix("language-").or_else(|| c.strip_prefix("lang-")))
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
         let raw = self.doc.raw_text(id);
         let body = raw.trim_end_matches('\n');
         if body.trim().is_empty() {
             return;
         }
+        let lang = self.detect_language(id);
         let md = format!("```{lang}\n{body}\n```");
         self.emit(UnitKind::Code, 0, body.to_string(), md);
+    }
+
+    /// Work out what language a code block is in.
+    ///
+    /// There is no single convention. Highlighters write `language-rust`,
+    /// `lang-rust` or a bare `rust`; GitHub writes `highlight-source-rust` on a
+    /// wrapper *above* the `<pre>`; others use `data-lang`. A fenced block
+    /// without its language is markedly less useful to a model reading it, so
+    /// this checks all of them — ancestors included — rather than the first
+    /// class attribute it happens to find.
+    fn detect_language(&self, id: Id) -> String {
+        let mut candidates: Vec<Id> = vec![id];
+        candidates.extend(self.doc.descendants(id).into_iter().skip(1).take(8));
+        candidates.extend(self.doc.ancestors(id, 2));
+
+        for node in candidates {
+            for key in ["class", "data-lang", "data-language", "data-code-language"] {
+                let Some(value) = self.doc.attr(node, key) else { continue };
+                if key != "class" {
+                    if let Some(lang) = normalize_language(&value) {
+                        return lang;
+                    }
+                    continue;
+                }
+                for token in value.split_whitespace() {
+                    let stripped = token
+                        .strip_prefix("language-")
+                        .or_else(|| token.strip_prefix("lang-"))
+                        .or_else(|| token.strip_prefix("highlight-source-"))
+                        .or_else(|| token.strip_prefix("highlight-text-"))
+                        .or_else(|| token.strip_prefix("sourceCode-"));
+                    if let Some(lang) = stripped.and_then(normalize_language) {
+                        return lang;
+                    }
+                    // A bare class name, but only if it names a language we
+                    // recognise — `hljs`, `prettyprint` and `notranslate` all
+                    // sit in the same attribute.
+                    if let Some(lang) = normalize_language(token)
+                        && KNOWN_LANGUAGES.contains(&lang.as_str())
+                    {
+                        return lang;
+                    }
+                }
+            }
+        }
+        String::new()
     }
 
     /// Is this a table of data, or a table used for layout?
@@ -408,19 +519,50 @@ impl<'d, 'a> Writer<'d, 'a> {
                         let inner = text::normalize_ws(&self.doc.inner_text(id));
                         if inner.is_empty() { inner } else { format!("`{inner}`") }
                     }
-                    "sup" => {
-                        // Footnote markers are pure noise in an LLM context.
-                        let inner = self.doc.inner_text(id);
-                        if inner.chars().all(|c| c.is_ascii_digit() || "[]".contains(c)) {
-                            String::new()
-                        } else {
-                            self.render_children_inline(id)
-                        }
-                    }
+                    "sup" => self.render_superscript(id),
                     _ => self.render_children_inline(id),
                 }
             }
         }
+    }
+
+    /// `<sup>` is two unrelated things wearing one tag.
+    ///
+    /// A citation marker is noise an LLM should never see. An exponent is data:
+    /// dropping it silently turns 10^23 into 10, which is the kind of error
+    /// that survives every downstream check. Telling them apart is the point.
+    fn render_superscript(&self, id: Id) -> String {
+        let inner = text::normalize_ws(&self.doc.inner_text(id));
+        if inner.is_empty() {
+            return String::new();
+        }
+        if self.is_citation_marker(id, &inner) {
+            return String::new();
+        }
+        // `^` only where it disambiguates: `10^23` and `mol^-1` need it,
+        // `1st` reads worse as `1^st`.
+        let numeric = inner.chars().all(|c| c.is_ascii_digit() || "+-.,()".contains(c))
+            && inner.chars().any(|c| c.is_ascii_digit());
+        if numeric { format!("^{inner}") } else { inner }
+    }
+
+    /// Is this `<sup>` a footnote or reference marker?
+    fn is_citation_marker(&self, id: Id, inner: &str) -> bool {
+        // Wikipedia and most CMSes wrap the marker in a link to the note.
+        if self.doc.descendants(id).into_iter().skip(1).any(|d| self.doc.tag_name(d) == "a") {
+            return true;
+        }
+        let sig = self.doc.signature(id);
+        if !sig.is_empty()
+            && ["reference", "citation", "footnote", "cite"].iter().any(|w| sig.contains(w))
+        {
+            return true;
+        }
+        // A bracketed number standing alone: `[1]`, `(12)`.
+        let trimmed = inner.trim();
+        let bracketed = (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            || (trimmed.starts_with('(') && trimmed.ends_with(')'));
+        bracketed && trimmed.chars().any(|c| c.is_ascii_digit())
     }
 
     /// Absolutise an attribute against the document's base URL.
@@ -465,6 +607,15 @@ impl<'d, 'a> Writer<'d, 'a> {
             heading_path: path,
         });
     }
+}
+
+/// Lowercase and sanity-check a language token.
+fn normalize_language(raw: &str) -> Option<String> {
+    let lang = raw.trim().trim_matches('"').to_ascii_lowercase();
+    let ok = !lang.is_empty()
+        && lang.len() <= 16
+        && lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '#' || c == '-');
+    ok.then_some(lang)
 }
 
 fn heading_level(name: &str) -> Option<u8> {

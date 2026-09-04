@@ -344,6 +344,31 @@ fn render(
     let mut last_unit_idx: Option<usize> = None;
     let mut last_path: Vec<String> = Vec::new();
 
+    // Rendered per source, so a source that contributes nothing visible can be
+    // dropped whole. A citation with no text under it is pure overhead — and it
+    // happens whenever the only unit selected from a page was its title, which
+    // the source header already carries.
+    let mut section = String::new();
+    let mut section_selected: Vec<Selected> = Vec::new();
+    let mut section_body = false;
+
+    /// Commit the section just built, or discard it if it has no body.
+    macro_rules! flush_section {
+        () => {
+            if section_body {
+                if !markdown.is_empty() {
+                    markdown.push_str("\n\n");
+                }
+                markdown.push_str(section.trim());
+                selected.append(&mut section_selected);
+            } else {
+                sources.pop();
+                section_selected.clear();
+            }
+            section.clear();
+        };
+    }
+
     for &i in chosen {
         let c = &candidates[i];
         let record = Selected {
@@ -356,15 +381,16 @@ fn render(
         };
 
         if last_source != Some(c.source) {
-            if !markdown.is_empty() {
-                markdown.push_str("\n\n");
+            if last_source.is_some() {
+                flush_section!();
+                section_body = false;
             }
             let article = &articles[c.source];
             let title = article.title().unwrap_or("Untitled").to_string();
             let hashes = "#".repeat(SOURCE_HEADING_LEVEL);
             match &article.url {
-                Some(url) => markdown.push_str(&format!("{hashes} {title}\n<{url}>")),
-                None => markdown.push_str(&format!("{hashes} {title}")),
+                Some(url) => section.push_str(&format!("{hashes} {title}\n<{url}>")),
+                None => section.push_str(&format!("{hashes} {title}")),
             }
             sources.push(SourceRef {
                 index: c.source,
@@ -388,7 +414,7 @@ fn render(
             if let Some(s) = sources.last_mut() {
                 s.tokens += c.unit.tokens;
             }
-            selected.push(record);
+            section_selected.push(record);
             continue;
         }
 
@@ -396,7 +422,7 @@ fn render(
             && let Some(prev) = last_unit_idx
             && c.unit_idx > prev + 1
         {
-            markdown.push_str("\n\n[…]");
+            section.push_str("\n\n[…]");
         }
 
         if cfg.include_breadcrumbs
@@ -404,28 +430,32 @@ fn render(
             && !c.unit.heading_path.is_empty()
             && c.unit.heading_path != last_path
         {
-            markdown.push_str(&format!("\n\n**{}**", c.unit.heading_path.join(" › ")));
+            section.push_str(&format!("\n\n**{}**", c.unit.heading_path.join(" › ")));
             last_path = c.unit.heading_path.clone();
         }
 
-        markdown.push_str("\n\n");
+        section.push_str("\n\n");
+        section_body = true;
         if c.unit.kind == UnitKind::Heading {
             // The source header occupies `##`, so a document's own headings are
             // demoted to sit beneath it. Left alone, an article's `<h1>` would
             // render as a sibling of the source it came from.
             let level = (c.unit.level as usize + SOURCE_HEADING_LEVEL).min(6);
-            markdown.push_str(&format!("{} {}", "#".repeat(level), c.unit.text));
+            section.push_str(&format!("{} {}", "#".repeat(level), c.unit.text));
             last_path = c.unit.heading_path.clone();
             last_path.push(c.unit.text.clone());
         } else {
-            markdown.push_str(&c.unit.markdown);
+            section.push_str(&c.unit.markdown);
         }
         last_unit_idx = Some(c.unit_idx);
 
         if let Some(s) = sources.last_mut() {
             s.tokens += c.unit.tokens;
         }
-        selected.push(record);
+        section_selected.push(record);
+    }
+    if last_source.is_some() {
+        flush_section!();
     }
 
     (markdown.trim().to_string(), selected, sources)
@@ -523,6 +553,29 @@ mod tests {
                 "heading collided with the source header: {line:?}\n{}",
                 ctx.markdown
             );
+        }
+    }
+
+    #[test]
+    fn a_source_contributing_only_its_title_is_dropped() {
+        // Two near-identical pages with different titles: the second has
+        // nothing to add but its heading, and a citation with no body under it
+        // is wasted budget.
+        let arts = vec![
+            article("https://a.dev/1", A),
+            article("https://mirror.dev/1", &A.replace("Tokio and rayon", "Tokio plus rayon")),
+        ];
+        let ctx = slim("tokio rayon", &arts, &SlimConfig::with_budget(400));
+        for (i, line) in ctx.markdown.lines().enumerate() {
+            if line.starts_with("## ") {
+                let rest: String = ctx.markdown.lines().skip(i + 1).collect::<Vec<_>>().join("");
+                let rest = rest.replace(['<', '>'], "");
+                assert!(
+                    rest.trim().len() > 40,
+                    "dangling source header with no body:\n{}",
+                    ctx.markdown
+                );
+            }
         }
     }
 
