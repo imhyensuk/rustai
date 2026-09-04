@@ -8,6 +8,33 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Data tables were being dropped, five different ways.** A table of national
+  GDP figures survived none of them, and each cause hid the next:
+  - `header` is a chrome token, and it matches inside `sticky-header-multi` —
+    the class Wikipedia puts on every sortable table — exactly as it does
+    inside `site-header`. Compounds scoped to a component (`sticky-`, `row-`,
+    `column-`, `table-`) are now stripped before the vocabulary sees them;
+    page-scoped ones still read as boilerplate.
+  - Markup weight counted attribute payload in full, so one serialised JSON
+    blob per element (334 KB of markup around 7.5 KB of text) made a data
+    table look like an ad slot. An attribute value now contributes at most 128
+    bytes.
+  - Link density and text-to-markup ratio ask whether a container reads like
+    prose. A data table answers no however good it is: cells hold a word, and
+    a header row that cites its sources is mostly links. Table elements are
+    exempt from both; the vocabulary still catches an ad wherever it sits.
+  - `is_data_table` rejected anything over 4,000 nodes, and a 223-row table
+    comes to 4,522. The fallback for a rejected table is to walk it as
+    ordinary blocks, which emits nothing at all — cells are too short to
+    survive as paragraphs — so a cap set near real tables deleted the output
+    rather than degrading it.
+  - Index detection read a linked cell as a listing entry, classifying data
+    tables as front pages. Anchors inside a table with header cells are no
+    longer counted; tables *without* header cells still are, because that is
+    how Hacker News lays out its front page.
+
+### Added
+
 - **Linux wheel builds needed `libclang` and nobody said so.** BoringSSL's
   binding crate build-depends on `bindgen` as well as `cmake`, so a container
   without clang fails with "Unable to find libclang" — a message that names

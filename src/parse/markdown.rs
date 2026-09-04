@@ -368,12 +368,20 @@ impl<'d, 'a> Writer<'d, 'a> {
 
     /// Is this a table of data, or a table used for layout?
     ///
-    /// Structural content inside cells is the giveaway. The size caps are a
-    /// second line of defence: a table too large to fit any context window is
-    /// better walked as ordinary blocks than emitted as one enormous unit.
+    /// Structural content inside cells is the giveaway. The caps are a second
+    /// line of defence against a `<table>` whose close tag the parser never
+    /// found, which swallows the rest of the document.
+    ///
+    /// Only the text cap speaks to context budget, and it is the tighter of
+    /// the two by far. The node cap has to stay well clear of what a real
+    /// table costs: a 223-row table of national GDP figures, six columns of
+    /// linked and footnoted cells, comes to 4,522 nodes around 6.4 KB of
+    /// text. Rejecting that emits nothing at all -- walking a data table as
+    /// ordinary blocks yields cells too short to survive as paragraphs -- so a
+    /// cap set near real tables does not degrade the output, it deletes it.
     fn is_data_table(&self, id: Id) -> bool {
         const MAX_TABLE_TEXT: u32 = 20_000;
-        const MAX_TABLE_NODES: usize = 4_000;
+        const MAX_TABLE_NODES: usize = 30_000;
 
         if self.doc.text_len(id) > MAX_TABLE_TEXT {
             return false;

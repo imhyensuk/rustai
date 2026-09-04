@@ -513,3 +513,97 @@ mod superscript_tests {
         assert_eq!(art.meta.title.as_deref(), Some("Steve Irwin's family & friends"));
     }
 }
+
+#[cfg(test)]
+mod table_regressions {
+    use super::*;
+
+    /// Wrap a table in enough prose that it is not the whole document, so the
+    /// dominance rule cannot rescue it and the heuristics under test are the
+    /// ones that decide.
+    fn page(table: &str) -> String {
+        format!(
+            "<html><body><article><h1>Figures</h1><p>{}</p>{table}</article></body></html>",
+            "A sentence of ordinary prose, with commas, to anchor the page. ".repeat(6)
+        )
+    }
+
+    fn table_rows(html: &str) -> usize {
+        let art = extract(html, Some("https://example.com/x")).expect("extract");
+        art.markdown.lines().filter(|l| l.starts_with('|')).count()
+    }
+
+    const ROWS: &str = "<tr><th>Country</th><th>GDP</th></tr>\
+                        <tr><td>Korea</td><td>1,870,000</td></tr>\
+                        <tr><td>Japan</td><td>4,230,000</td></tr>";
+
+    /// `header` is a chrome token, but `sticky-header-multi` is a data table
+    /// describing its own headings — the class Wikipedia puts on every
+    /// sortable table.
+    #[test]
+    fn component_scoped_header_is_not_page_chrome() {
+        for cls in [
+            "wikitable sortable sticky-header-multi static-row-numbers",
+            "sticky-header-multi",
+            "static-row-header",
+            "table-footer",
+            "column-header",
+        ] {
+            let html = page(&format!("<table class=\"{cls}\">{ROWS}</table>"));
+            assert!(table_rows(&html) >= 4, "class={cls} lost the table");
+        }
+    }
+
+    /// The page-scoped compounds must still read as boilerplate.
+    #[test]
+    fn page_scoped_header_is_still_chrome() {
+        for cls in ["site-header", "page-header", "global-header", "header", "site-footer"] {
+            let html = format!(
+                "<html><body><article><h1>T</h1><p>{}</p>\
+                 <div class=\"{cls}\"><a href=\"/a\">Menu one</a><a href=\"/b\">Menu two</a></div>\
+                 </article></body></html>",
+                "Ordinary prose, with commas, at length. ".repeat(6)
+            );
+            let art = extract(&html, Some("https://example.com/x")).expect("extract");
+            assert!(!art.text.contains("Menu one"), "class={cls} survived");
+        }
+    }
+
+    /// One enormous attribute value must not read as "almost pure markup".
+    /// Wikipedia's parser hangs serialised JSON off every element.
+    #[test]
+    fn giant_attribute_does_not_bury_a_table() {
+        let blob = "y".repeat(3000);
+        let table = format!(
+            "<table><tr><th>Country</th><th>GDP</th></tr>\
+             <tr><td data-mw='{{\"parts\":\"{blob}\"}}'>Korea</td><td>1,870,000</td></tr></table>"
+        );
+        assert!(table_rows(&page(&table)) >= 3, "attribute payload sank the table");
+    }
+
+    /// A header row that cites each column's source is mostly links, and a
+    /// data cell holds one word. Neither makes a table a link farm.
+    #[test]
+    fn link_heavy_cells_survive() {
+        let table = "<table>\
+            <tr><th><a href=\"/imf\">IMF</a></th><th><a href=\"/wb\">World Bank</a></th></tr>\
+            <tr><td><a href=\"/kr\">Korea</a></td><td>1,870,000</td></tr></table>";
+        assert!(table_rows(&page(table)) >= 3, "link density dropped the table");
+    }
+
+    /// A real data table runs to thousands of nodes. Rejecting it does not
+    /// degrade the output, it deletes it — walked as blocks, cells are too
+    /// short to survive as paragraphs.
+    #[test]
+    fn large_data_table_is_still_tabulated() {
+        let mut t = String::from("<table><tr><th>Country</th><th>GDP</th></tr>");
+        for i in 0..400 {
+            t.push_str(&format!(
+                "<tr><td><a href=\"/c{i}\" title=\"country {i}\">Country {i}</a></td>\
+                 <td>{i},000</td></tr>"
+            ));
+        }
+        t.push_str("</table>");
+        assert!(table_rows(&page(&t)) > 300, "large table was not tabulated");
+    }
+}

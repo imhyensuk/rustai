@@ -25,6 +25,13 @@ pub(crate) fn decode_entities(s: &str) -> Cow<'_, str> {
     Cow::Owned(html_escape::decode_html_entities(s).into_owned())
 }
 
+/// Most bytes a single attribute value may contribute to an element's markup
+/// weight.
+///
+/// Generous next to real attributes -- a long `class` or a `srcset` fits --
+/// and far below the serialised JSON that annotation-heavy generators attach.
+const ATTR_VALUE_WEIGHT_CAP: u32 = 128;
+
 /// Index into the node arena.
 pub(crate) type Id = usize;
 
@@ -150,7 +157,16 @@ impl<'a> Doc<'a> {
                     let mut own = 2 * name.len() as u32 + 4;
                     for (key, value) in tag.attributes().iter() {
                         own = own.saturating_add(key.len() as u32 + 4);
-                        own = own.saturating_add(value.map(|v| v.len() as u32).unwrap_or(0));
+                        // Attribute payload counts, but only up to a point. The
+                        // ratio this feeds asks "is this scaffolding or prose?",
+                        // and scaffolding shows up as many elements, not as one
+                        // enormous value. Wikipedia's parser hangs a `data-mw`
+                        // JSON blob off every element of a sortable table --
+                        // 334 KB of markup around 7.5 KB of text -- and counting
+                        // those in full reads a table of national GDP figures as
+                        // an ad slot.
+                        let len = value.map(|v| v.len() as u32).unwrap_or(0);
+                        own = own.saturating_add(len.min(ATTR_VALUE_WEIGHT_CAP));
                     }
                     bytes[id] = bytes[id].saturating_add(own);
                     if INVISIBLE_TAGS.contains(&name.as_ref()) {

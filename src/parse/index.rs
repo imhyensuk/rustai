@@ -109,6 +109,31 @@ pub struct Link {
 /// Links inside boilerplate, duplicate targets and navigation controls are all
 /// dropped, so what comes back is the page's actual inventory rather than every
 /// `<a>` in the document.
+/// Nodes sitting inside a table that has header cells.
+///
+/// A `<td>` holding one linked country name is a value, not an entry in a
+/// listing — but the same shape is how Hacker News lays out its front page,
+/// so "inside a table" cannot be the test. Header cells are the discriminator
+/// that survives both: a table of data labels its columns, a table used for
+/// layout has nothing to label.
+fn inside_header_table(doc: &Doc<'_>) -> Vec<bool> {
+    let mut mark = vec![false; doc.dom.nodes().len()];
+    for &id in &doc.preorder {
+        if doc.tag_name(id) != "table" || mark[id] {
+            continue;
+        }
+        let descendants = doc.descendants(id);
+        if descendants.iter().any(|&d| doc.tag_name(d) == "th") {
+            for d in descendants {
+                if let Some(slot) = mark.get_mut(d) {
+                    *slot = true;
+                }
+            }
+        }
+    }
+    mark
+}
+
 pub(crate) fn harvest(doc: &Doc<'_>, base: Option<&Url>, cfg: &DenoiseConfig) -> Vec<Link> {
     // The article denoiser drops containers for being link-dense and
     // markup-heavy. On a listing page those are not defects — they are the
@@ -116,6 +141,7 @@ pub(crate) fn harvest(doc: &Doc<'_>, base: Option<&Url>, cfg: &DenoiseConfig) ->
     // `<nav>`, a footer or a cookie banner are still rejected.
     let cfg = &DenoiseConfig { max_link_density: 1.0, min_text_ratio: 0.0, ..cfg.clone() };
 
+    let in_data_table = inside_header_table(doc);
     let mut links: Vec<Link> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Heading ids are kept so a link can exclude the heading it sits inside:
@@ -137,6 +163,9 @@ pub(crate) fn harvest(doc: &Doc<'_>, base: Option<&Url>, cfg: &DenoiseConfig) ->
             continue;
         }
         if name != "a" {
+            continue;
+        }
+        if in_data_table[id] {
             continue;
         }
 
@@ -393,10 +422,11 @@ pub(crate) fn units_from_links(links: &[Link]) -> Vec<crate::parse::Unit> {
 /// common case. This pass touches only precomputed lengths and the tag name,
 /// and it over-estimates, so a page it rejects could not have qualified.
 pub(crate) fn could_be_index(doc: &Doc<'_>, article_chars: usize) -> bool {
+    let in_data_table = inside_header_table(doc);
     let mut count = 0usize;
     let mut chars = 0usize;
     for &id in &doc.preorder {
-        if doc.tag_name(id) != "a" {
+        if doc.tag_name(id) != "a" || in_data_table[id] {
             continue;
         }
         let len = doc.text_len(id) as usize;

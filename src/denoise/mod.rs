@@ -30,6 +30,18 @@ pub const DROP_TAGS: &[&str] = &[
 /// Tags that are boilerplate by definition in the HTML5 outline.
 pub const CHROME_TAGS: &[&str] = &["nav", "footer", "aside", "menu"];
 
+/// Table machinery, exempt from the two prose-shaped heuristics.
+///
+/// Link density and text-to-markup ratio both ask "does this container read
+/// like prose?", and a data table answers no however good it is: cells hold a
+/// word or a number, and a header row that cites its sources is *mostly*
+/// links. Judging a table by those thresholds drops the GDP of every nation
+/// for looking insufficiently like a paragraph. What a table is still gets
+/// decided -- by the vocabulary above, which catches an ad wherever it sits,
+/// and by the writer's own structural test for layout tables.
+const TABLE_TAGS: &[&str] =
+    &["table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col"];
+
 /// Class/id tokens that are never content, and that no positive marker
 /// outranks.
 ///
@@ -63,6 +75,23 @@ static NEGATIVE: LazyLock<Regex> = LazyLock::new(|| {
         r"(?i)(^|[-_\s])(ad|ads|adbox|advert|advertisement|sponsor|sponsored|promo|promotion|banner|popup|modal|overlay|interstitial|cookie|consent|gdpr|newsletter|subscribe|signup|paywall|share|sharing|social|follow|comment|comments|disqus|livefyre|reply|sidebar|side-bar|widget|related|recommend|recirc|outbrain|taboola|trending|popular|breadcrumb|pagination|pager|paging|nav|navbar|navigation|menu|masthead|footer|header|topbar|toolbar|utility|skip|hidden|invisible|screen-reader|sr-only|visually-hidden|meta|byline|tags|tag-list|author-box|bio|cta|newsl|toc|table-of-contents|infobox|navbox|metadata|mw-editsection|reference|citation|footnote)([-_\s]|$)",
     )
     .expect("static negative regex")
+});
+
+/// `header` and `footer` qualified by a word that scopes them to a component
+/// rather than to the page.
+///
+/// The chrome vocabulary matches tokens, not whole class names, so `header`
+/// fires inside `sticky-header-multi` exactly as it does inside `site-header`.
+/// The first is a data table describing its own sticky column headings — the
+/// markup Wikipedia puts on every sortable table — and dropping it costs the
+/// reader the table. Compounds listed here are stripped from a signature
+/// before the vocabulary sees it; unqualified `header`, and page-scoped
+/// compounds like `site-header`, are left alone.
+static COMPONENT_SCOPED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(^|[-_\s])(sticky|table|col|column|row|grid|data|sort|sortable|cell|group|thead|tfoot)[-_](headers?|footers?)([-_\s]|$)",
+    )
+    .expect("static component-scoped regex")
 });
 
 static POSITIVE: LazyLock<Regex> = LazyLock::new(|| {
@@ -132,8 +161,20 @@ impl DenoiseStats {
 }
 
 /// Class/id weighting, mirroring Readability's `getClassWeight`.
+/// A node's class/id signature with component-scoped `header`/`footer`
+/// compounds removed, ready to match against the vocabularies.
+///
+/// See [`COMPONENT_SCOPED`] for why they are removed rather than matched.
+fn signature_for_match(doc: &Doc<'_>, id: Id) -> String {
+    let raw = doc.signature(id);
+    match COMPONENT_SCOPED.replace_all(&raw, " ") {
+        std::borrow::Cow::Borrowed(_) => raw,
+        std::borrow::Cow::Owned(cleaned) => cleaned,
+    }
+}
+
 pub(crate) fn class_weight(doc: &Doc<'_>, id: Id) -> f32 {
-    let sig = doc.signature(id);
+    let sig = signature_for_match(doc, id);
     if sig.is_empty() {
         return 0.0;
     }
@@ -196,7 +237,7 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     let text = doc.text_len(id);
 
     if cfg.drop_by_class {
-        let sig = doc.signature(id);
+        let sig = signature_for_match(doc, id);
         // Commercial markers outrank everything, including a positive one.
         if ABSOLUTE.is_match(&sig) {
             return true;
@@ -211,6 +252,10 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
         if class_weight(doc, id) < 0.0 && text < 400 {
             return true;
         }
+    }
+
+    if TABLE_TAGS.contains(&name) {
+        return false;
     }
 
     // Link farms. Headings and list items legitimately run link-heavy, so only
