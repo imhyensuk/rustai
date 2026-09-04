@@ -79,10 +79,12 @@ pub(crate) const BLOCK_TAGS: &[&str] = &[
 pub(crate) struct Doc<'a> {
     pub(crate) dom: tl::VDom<'a>,
     parent: Vec<Option<Id>>,
+    bytes: Vec<u32>,
     text_len: Vec<u32>,
     link_len: Vec<u32>,
     /// Ids in document order.
     pub(crate) preorder: Vec<Id>,
+    document_text: u32,
 }
 
 impl<'a> Doc<'a> {
@@ -120,19 +122,31 @@ impl<'a> Doc<'a> {
         // descendant has a strictly larger pre-order index than its ancestor.
         let mut text_len = vec![0u32; n];
         let mut link_len = vec![0u32; n];
+        let mut bytes = vec![0u32; n];
         for &id in preorder.iter().rev() {
             let node = match dom.nodes().get(id) {
                 Some(node) => node,
                 None => continue,
             };
             match node {
-                tl::Node::Raw(bytes) => {
-                    let raw = bytes.as_utf8_str();
+                tl::Node::Raw(raw_bytes) => {
+                    let raw = raw_bytes.as_utf8_str();
                     let decoded = decode_entities(&raw);
                     text_len[id] = text::visible_len(decoded.trim()) as u32;
+                    bytes[id] = bytes[id].saturating_add(raw.len() as u32);
                 }
                 tl::Node::Tag(tag) => {
                     let name = tag.name().as_utf8_str();
+                    // Markup weight of this element's own tags, computed rather
+                    // than measured: `tl` sets a tag's raw slice to just the
+                    // opening tag when it cannot find the matching close, which
+                    // is exactly the malformed-page case the ratio must survive.
+                    let mut own = 2 * name.len() as u32 + 4;
+                    for (key, value) in tag.attributes().iter() {
+                        own = own.saturating_add(key.len() as u32 + 4);
+                        own = own.saturating_add(value.map(|v| v.len() as u32).unwrap_or(0));
+                    }
+                    bytes[id] = bytes[id].saturating_add(own);
                     if INVISIBLE_TAGS.contains(&name.as_ref()) {
                         text_len[id] = 0;
                         link_len[id] = 0;
@@ -140,15 +154,44 @@ impl<'a> Doc<'a> {
                         link_len[id] = text_len[id];
                     }
                 }
-                tl::Node::Comment(_) => text_len[id] = 0,
+                tl::Node::Comment(c) => {
+                    text_len[id] = 0;
+                    bytes[id] = c.as_bytes().len() as u32 + 7;
+                }
             }
             if let Some(p) = parent[id] {
                 text_len[p] = text_len[p].saturating_add(text_len[id]);
                 link_len[p] = link_len[p].saturating_add(link_len[id]);
+                bytes[p] = bytes[p].saturating_add(bytes[id]);
             }
         }
 
-        Ok(Doc { dom, parent, text_len, link_len, preorder })
+        // Total visible text, taken from `<body>` when there is one. This is
+        // the denominator for "is this node most of the document?", which is
+        // what keeps a mis-nested page from being classified as boilerplate.
+        let document_text = preorder
+            .iter()
+            .copied()
+            .find(|&id| {
+                dom.nodes()
+                    .get(id)
+                    .and_then(|n| n.as_tag())
+                    .is_some_and(|t| t.name().as_utf8_str().eq_ignore_ascii_case("body"))
+            })
+            .map(|body| text_len[body])
+            .unwrap_or_else(|| preorder.first().map(|&r| text_len[r]).unwrap_or(0));
+
+        Ok(Doc { dom, parent, bytes, text_len, link_len, preorder, document_text })
+    }
+
+    /// Does this node hold most of the document's visible text?
+    ///
+    /// Boilerplate is, by definition, a minority of a page. A node that holds
+    /// the majority is the article — even when its class or `role` says
+    /// otherwise, which happens whenever a lenient parser fails to close a tag
+    /// and nests the whole document inside a navigation element.
+    pub(crate) fn is_dominant(&self, id: Id) -> bool {
+        self.document_text > 0 && self.text_len(id) as u64 * 2 > self.document_text as u64
     }
 
     #[inline]
@@ -189,13 +232,15 @@ impl<'a> Doc<'a> {
         (self.link_len.get(id).copied().unwrap_or(0) as f32 / text as f32).min(1.0)
     }
 
-    /// Serialised size of the node's own markup, in bytes.
+    /// Markup weight of a node's whole subtree, in bytes.
     ///
-    /// `tl` keeps a borrowed slice of the original source per tag, so this is
-    /// O(1) — which is what makes a per-node text-to-HTML ratio affordable.
+    /// Accumulated in the same reverse sweep as the text metrics rather than
+    /// read off `tl`'s per-tag source slice, because that slice collapses to
+    /// the opening tag alone whenever the parser cannot match a closing tag —
+    /// silently reporting 28 bytes for an element holding 180 KB.
     #[inline]
     pub(crate) fn html_len(&self, id: Id) -> u32 {
-        self.tag(id).map(|t| t.raw().as_bytes().len() as u32).unwrap_or_else(|| self.text_len(id))
+        self.bytes.get(id).copied().unwrap_or(0)
     }
 
     /// Ratio of visible text to markup weight.
@@ -372,6 +417,21 @@ mod tests {
         let script = find(&doc, "script");
         assert_eq!(doc.text_len(script), 0);
         assert!(!doc.inner_text(find(&doc, "body")).contains("should not count"));
+    }
+
+    #[test]
+    fn subtree_bytes_reflect_the_whole_subtree() {
+        let doc = Doc::parse(HTML).unwrap();
+        let body = find(&doc, "body");
+        let article = find(&doc, "article");
+        let p = find(&doc, "p");
+        // Strictly decreasing from ancestor to descendant, and large enough to
+        // account for the text it contains.
+        assert!(doc.html_len(body) > doc.html_len(article));
+        assert!(doc.html_len(article) > doc.html_len(p));
+        assert!(doc.html_len(p) >= doc.text_len(p));
+        // Prose sits far above the widget threshold; a link farm does not.
+        assert!(doc.text_ratio(p) > 0.3, "{}", doc.text_ratio(p));
     }
 
     #[test]

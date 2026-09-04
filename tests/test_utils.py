@@ -105,7 +105,8 @@ class TestClientConstruction:
     @pytest.mark.parametrize(
         "provider",
         ["duckduckgo", "ddg", "wikipedia", "wikipedia:ko", "searxng:https://searx.be",
-         "rss:https://a.dev/f.xml", "sitemap:https://a.dev/s.xml"],
+         "rss:https://a.dev/f.xml", "sitemap:https://a.dev/s.xml",
+         "arxiv", "openalex", "crossref", "OpenAlex"],
     )
     def test_provider_specs_accepted(self, provider):
         rustai.Client(providers=[provider])
@@ -124,6 +125,13 @@ class TestClientConstruction:
     )
     def test_impersonation_presets(self, impersonate):
         rustai.Client(impersonate=impersonate)
+
+    def test_academic_providers_and_contact_email(self):
+        c = rustai.Client(
+            providers=["arxiv", "openalex", "crossref"],
+            contact_email="you@example.com",
+        )
+        assert "arxiv" in repr(c)
 
     def test_unknown_impersonation_profile_rejected(self):
         with pytest.raises(ValueError, match="unknown impersonation profile"):

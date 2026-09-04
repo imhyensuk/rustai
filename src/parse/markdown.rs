@@ -20,6 +20,16 @@ const INLINE_TAGS: &[&str] = &[
 
 const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
 
+/// Above this serialised size, an "inline" element is checked for block-level
+/// content before being believed.
+///
+/// Inline elements are small by nature. A `<span>` carrying 50 KB of markup is
+/// not emphasis — it is an unclosed tag that swallowed the rest of the page,
+/// and flattening it would turn the whole document into one paragraph. The
+/// size gate keeps the check off the hot path: `html_len` is O(1) and the vast
+/// majority of inline nodes never pay for the descendant walk.
+const INLINE_INSPECT_BYTES: u32 = 2048;
+
 /// Options that change what ends up in the Markdown.
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
@@ -97,14 +107,25 @@ impl<'d, 'a> Writer<'d, 'a> {
                     }
                 }
             }
+            // A paragraph is only a paragraph if it holds no block-level
+            // element. HTML forbids that nesting, but lenient parsers -- this
+            // one included -- do not insert the implied `</p>` that a browser
+            // would, so an unclosed `<p>` can end up owning the rest of the
+            // document. Recursing costs one check and turns that failure into
+            // ordinary output.
             "p" | "dd" | "dt" | "figcaption" | "summary" | "address" => {
-                let t = text::normalize_ws(&self.render_children_inline(id));
-                if !t.is_empty() {
-                    let plain = strip_markdown(&t);
-                    self.emit(UnitKind::Paragraph, 0, plain, t);
+                if self.doc.is_leaf_block(id) {
+                    let t = text::normalize_ws(&self.render_children_inline(id));
+                    if !t.is_empty() {
+                        let plain = strip_markdown(&t);
+                        self.emit(UnitKind::Paragraph, 0, plain, t);
+                    }
+                } else {
+                    self.walk_children(id);
                 }
             }
             "pre" => self.emit_code(id),
+            "blockquote" if !self.doc.is_leaf_block(id) => self.walk_children(id),
             "blockquote" => {
                 let inner = self.doc.inner_text(id);
                 if !inner.is_empty() {
@@ -118,8 +139,17 @@ impl<'d, 'a> Writer<'d, 'a> {
                 self.list_depth = self.list_depth.saturating_sub(1);
             }
             "li" => self.emit_list_item(id),
-            "table" if self.opts.include_tables => self.emit_table(id),
-            "table" => {}
+            // A table holding headings, sections or other tables is laying out
+            // a page, not tabulating data. Rendering one as a pipe table turns
+            // a whole document into a single unreadable row — and lenient HTML
+            // parsers, this one included, will happily put an entire page
+            // inside a `<table>` whose close tag they failed to match.
+            "table" if self.is_data_table(id) => {
+                if self.opts.include_tables {
+                    self.emit_table(id);
+                }
+            }
+            "table" => self.walk_children(id),
             "hr" | "br" => {}
             _ => self.walk_children(id),
         }
@@ -164,31 +194,34 @@ impl<'d, 'a> Writer<'d, 'a> {
         match self.doc.node(id) {
             Some(tl::Node::Raw(_)) => true,
             Some(tl::Node::Tag(tag)) => {
-                INLINE_TAGS.contains(&tag.name().as_utf8_str().to_ascii_lowercase().as_str())
+                if !INLINE_TAGS.contains(&tag.name().as_utf8_str().to_ascii_lowercase().as_str()) {
+                    return false;
+                }
+                self.doc.html_len(id) <= INLINE_INSPECT_BYTES || self.doc.is_leaf_block(id)
             }
             _ => false,
         }
     }
 
     fn emit_list_item(&mut self, id: Id) {
-        // Nested lists are walked separately so they keep their own indent.
+        // Only the inline run becomes the bullet. Block children — nested
+        // lists, but also the paragraphs and tables that `<li>` is allowed to
+        // contain — are walked so they keep their own structure. Flattening
+        // them with `inner_text` is how a single mis-nested `<li>` ends up
+        // holding an entire page.
         let mut inline_run: Vec<Id> = Vec::new();
-        let mut nested: Vec<Id> = Vec::new();
+        let mut blocks: Vec<Id> = Vec::new();
         for child in self.doc.children(id) {
-            if matches!(self.doc.tag_name(child).as_str(), "ul" | "ol" | "dl") {
-                nested.push(child);
-            } else {
+            if self.is_inline(child) {
                 inline_run.push(child);
+            } else {
+                blocks.push(child);
             }
         }
+
         let mut buf = String::new();
         for child in inline_run {
-            if self.is_inline(child) {
-                buf.push_str(&self.render_inline(child));
-            } else if !is_noise(self.doc, child, self.cfg) {
-                buf.push_str(&self.doc.inner_text(child));
-                buf.push(' ');
-            }
+            buf.push_str(&self.render_inline(child));
         }
         let t = text::normalize_ws(&buf);
         if !t.is_empty() {
@@ -196,7 +229,7 @@ impl<'d, 'a> Writer<'d, 'a> {
             let md = format!("{}- {}", "  ".repeat(depth), t);
             self.emit(UnitKind::ListItem, depth as u8, strip_markdown(&t), md);
         }
-        for child in nested {
+        for child in blocks {
             self.walk(child);
         }
     }
@@ -222,11 +255,48 @@ impl<'d, 'a> Writer<'d, 'a> {
         self.emit(UnitKind::Code, 0, body.to_string(), md);
     }
 
+    /// Is this a table of data, or a table used for layout?
+    ///
+    /// Structural content inside cells is the giveaway. The size caps are a
+    /// second line of defence: a table too large to fit any context window is
+    /// better walked as ordinary blocks than emitted as one enormous unit.
+    fn is_data_table(&self, id: Id) -> bool {
+        const MAX_TABLE_TEXT: u32 = 20_000;
+        const MAX_TABLE_NODES: usize = 4_000;
+
+        if self.doc.text_len(id) > MAX_TABLE_TEXT {
+            return false;
+        }
+        let descendants = self.doc.descendants(id);
+        if descendants.len() > MAX_TABLE_NODES {
+            return false;
+        }
+        !descendants.iter().skip(1).any(|&d| {
+            matches!(
+                self.doc.tag_name(d).as_str(),
+                "table"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "section"
+                    | "article"
+                    | "aside"
+                    | "nav"
+                    | "footer"
+                    | "header"
+                    | "figure"
+            )
+        })
+    }
+
     fn emit_table(&mut self, id: Id) {
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut header: Option<Vec<String>> = None;
         for d in self.doc.descendants(id) {
-            if self.doc.tag_name(d) != "tr" {
+            if self.doc.tag_name(d) != "tr" || is_noise(self.doc, d, self.cfg) {
                 continue;
             }
             let mut cells = Vec::new();

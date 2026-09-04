@@ -35,6 +35,7 @@ Rust:
 | API key | required | — | none |
 | Extraction | vendor's | yours to build | built in |
 | Context compression | rarely | yours to build | built in |
+| Scholarly sources | rarely | yours to build | built in |
 | Peak RSS, 200 docs | n/a | +15.5 MB | +4.4 MB |
 
 See [Benchmarks](#benchmarks) for how those numbers were produced.
@@ -64,9 +65,25 @@ query ──▶ search router ──▶ fetcher ──▶ denoiser ──▶ sli
 
 ### 1. Search router — free providers, fused
 
-DuckDuckGo, the Wikipedia API, any SearXNG instance, plus RSS/Atom feeds and XML
-sitemaps for sites you already trust. All queried concurrently; a provider that
-fails or rate-limits degrades the result set instead of failing the call.
+| Kind | Providers |
+|---|---|
+| Web search | `duckduckgo`, `searxng:<instance>` |
+| Reference | `wikipedia`, `wikipedia:ko` (any language edition) |
+| **Scholarly** | `arxiv`, `openalex`, `crossref` |
+| Sites you trust | `rss:<feed>`, `sitemap:<sitemap.xml>` |
+
+All keyless, all free, all queried concurrently; a provider that fails or
+rate-limits degrades the result set instead of failing the call.
+
+The scholarly providers are not a nicety. A web search for a paper returns blog
+posts *about* the paper; arXiv, OpenAlex and Crossref return the paper. OpenAlex
+stores abstracts as an inverted index for licensing reasons, and `rustai`
+reconstructs them, which makes its snippets the most informative of any provider
+here. arXiv results always point at the abstract page, never the PDF, because a
+PDF is not something this pipeline can read.
+
+OpenAlex and Crossref run a faster "polite pool" for callers who identify
+themselves — pass `contact_email` to use it.
 
 Rankings are combined with **reciprocal rank fusion**, because provider scores
 are not comparable to each other but ranks always are. URLs are canonicalised
@@ -84,6 +101,11 @@ Being able to get in is not a licence to be rude, so `robots.txt`, `Crawl-delay`
 per-host spacing, a concurrency ceiling, capped bodies and backoff-on-retry are
 all on by default. Legacy encodings (EUC-KR, Shift_JIS) are decoded properly
 rather than assumed to be UTF-8.
+
+HTTP redirects are followed, and so are HTML-level ones: a stub page that
+redirects through `<meta refresh>` or `location.replace` returns a perfectly
+good `200` containing no content, which is how sites that canonicalise URLs in
+the browser silently produce empty extractions elsewhere.
 
 For the minority of pages that ship an empty shell and build the DOM in
 JavaScript, an opt-in headless Chrome fallback fires — but only after a cheap
@@ -149,7 +171,8 @@ per-host pacing state, so it is meaningfully faster than repeated one-shot calls
 
 ```python
 client = rustai.Client(
-    providers=["duckduckgo", "wikipedia:en", "wikipedia:ko"],
+    providers=["duckduckgo", "wikipedia:en", "arxiv", "openalex"],
+    contact_email="you@example.com",   # OpenAlex/Crossref polite pool
     max_tokens=4096,
     concurrency=24,
     impersonate="chrome",       # or "firefox", "safari", "random", "chrome_143", "none"
@@ -178,6 +201,15 @@ for unit in article.units:
     print(unit.kind, unit.tokens, unit.heading_path, unit.text[:60])
 ```
 
+For a batch, `extract_many` runs across every core and releases the GIL, so it
+is roughly 4× the throughput of a loop over `extract` — and about 30× that of
+`trafilatura`:
+
+```python
+articles = rustai.extract_many(list_of_html)                 # 1:1 with the input
+articles = rustai.extract_many(list_of_html, list_of_urls)   # positional urls
+```
+
 ### Compress a set you assembled yourself
 
 ```python
@@ -188,6 +220,19 @@ print(ctx.markdown)
 
 `max_tokens_per_source` caps how much any single page can contribute, so one long
 article cannot crowd out corroborating sources.
+
+### Scholarly search
+
+```python
+client = rustai.Client(
+    providers=["arxiv", "openalex", "crossref"],
+    contact_email="you@example.com",
+)
+for hit in client.search("sparse attention long context"):
+    print(hit.title)
+    print(" ", hit.url)
+    print(" ", hit.snippet[:120])   # authors (year). abstract…
+```
 
 ### Your own sites, without a search engine
 
@@ -293,33 +338,46 @@ blob. Synthetic so the benchmark is deterministic and redistributable — the
 chrome-to-content ratio is what an extractor is tested on, not raw size.
 
 **Rust alone**, streaming one document at a time (Apple M1, macOS 26.6, release
-build, median of 4 runs):
+build):
 
 ```
 documents      200
 input          9.43 MB
 output         2.27 MB in 12000 units
 compression    75.9%
-throughput     ~520 docs/s, ~24.5 MB/s
-peak RSS       4.8 MiB
+throughput     638 docs/s, 30.1 MB/s
+peak RSS       4.9 MiB
 ```
 
-**From Python** (CPython 3.14), streaming, against BeautifulSoup + lxml doing
-the same job — tag-blocklist removal plus text extraction:
+**From Python** (CPython 3.14):
 
-| Engine | Throughput | Peak process RSS | Marginal RSS |
-|---|---|---|---|
-| `rustai` | 531 docs/s | 39.3 MB | **+4.4 MB** |
-| `bs4` + `lxml` | 257 docs/s | 50.4 MB | +15.5 MB |
+| Engine | Throughput | vs `trafilatura` |
+|---|---|---|
+| `rustai.extract_many` | **3,545 docs/s** | **16.1×** |
+| `rustai.extract` (loop) | 840 docs/s | 3.8× |
+| `trafilatura` | 220 docs/s | 1× |
+
+Median of three runs. `trafilatura` is the fair comparison — it is the closest
+equivalent, since it also produces structured Markdown — and both emit the same
+2.27 MB of output from the same input. `extract_many` runs across the rayon pool
+with the GIL released, which is where the further 4.2× comes from.
+
+Peak process RSS, streaming one document at a time: `rustai` 39.3 MB against
+`bs4`+`lxml`'s 50.4 MB — **+4.4 MB** versus **+15.5 MB** over the 34.9 MB floor
+of a CPython 3.14 interpreter holding the corpus.
+
+Concurrent fetching, measured on 20 live URLs across many hosts: 1.7 pages/s
+serial versus 15.1 concurrent, an **8.7× speedup**. Beyond that the bottleneck
+is the remote server, not this library.
 
 "Marginal RSS" subtracts the 34.9 MB floor of a CPython 3.14 interpreter holding
 the corpus, which both engines pay identically. Importing `rustai` itself costs
 1.0 MB over a bare interpreter.
 
-Two caveats worth stating plainly. The comparison is not apples-to-apples in
-`rustai`'s favour: it produces structured Markdown units with metadata, while the
-`bs4` baseline produces a flat string — so `rustai` is doing strictly more work
-per document. And these are single-machine numbers on one synthetic corpus; run
+Caveats worth stating plainly. The `bs4` baseline produces a flat string while
+`rustai` produces structured Markdown units with metadata, so that row
+understates `rustai`'s work per document; the `trafilatura` row is the honest
+comparison. And these are single-machine numbers on one synthetic corpus — run
 the benchmark on your own pages before trusting them.
 
 ## Development

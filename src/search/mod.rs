@@ -9,6 +9,7 @@
 //! a partial result rather than an error, and reports what failed alongside
 //! what worked.
 
+mod academic;
 mod duckduckgo;
 mod feeds;
 mod searxng;
@@ -55,6 +56,12 @@ const TRACKING_PARAMS: &[&str] = &[
 pub enum Provider {
     /// DuckDuckGo's HTML endpoint.
     DuckDuckGo,
+    /// arXiv's Atom API — preprints in physics, maths, CS and related fields.
+    Arxiv,
+    /// OpenAlex, the open index of scholarly works across every discipline.
+    OpenAlex,
+    /// Crossref, the DOI registry's metadata index.
+    Crossref,
     /// The MediaWiki search API for a given language code.
     Wikipedia(String),
     /// A SearXNG instance, by base URL.
@@ -70,6 +77,9 @@ impl Provider {
     pub fn name(&self) -> &'static str {
         match self {
             Provider::DuckDuckGo => "duckduckgo",
+            Provider::Arxiv => "arxiv",
+            Provider::OpenAlex => "openalex",
+            Provider::Crossref => "crossref",
             Provider::Wikipedia(_) => "wikipedia",
             Provider::SearxNG(_) => "searxng",
             Provider::Rss(_) => "rss",
@@ -89,6 +99,9 @@ impl Provider {
         };
         Ok(match kind.to_ascii_lowercase().as_str() {
             "duckduckgo" | "ddg" => Provider::DuckDuckGo,
+            "arxiv" => Provider::Arxiv,
+            "openalex" => Provider::OpenAlex,
+            "crossref" => Provider::Crossref,
             "wikipedia" | "wiki" => {
                 Provider::Wikipedia(if arg.is_empty() { "en".into() } else { arg.into() })
             }
@@ -142,6 +155,11 @@ pub struct SearchConfig {
     pub limit: usize,
     /// Maximum results to request from each provider.
     pub per_provider: usize,
+    /// Contact address for the OpenAlex and Crossref "polite pools".
+    ///
+    /// Both APIs route identified callers to a faster, more reliable pool.
+    /// Leaving this unset works, but is slower and more likely to be throttled.
+    pub contact_email: Option<String>,
 }
 
 impl Default for SearchConfig {
@@ -150,6 +168,7 @@ impl Default for SearchConfig {
             providers: vec![Provider::DuckDuckGo, Provider::Wikipedia("en".into())],
             limit: 10,
             per_provider: 15,
+            contact_email: None,
         }
     }
 }
@@ -184,13 +203,22 @@ impl Router {
     /// Run the query against every configured provider.
     pub async fn search(&self, query: &str) -> SearchOutcome {
         let limit = self.cfg.per_provider;
+        let contact = self.cfg.contact_email.clone();
         let tasks = self.cfg.providers.iter().map(|p| {
             let fetcher = self.fetcher.clone();
             let provider = p.clone();
             let query = query.to_string();
+            let contact = contact.clone();
             async move {
                 let out = match &provider {
                     Provider::DuckDuckGo => duckduckgo::search(&fetcher, &query, limit).await,
+                    Provider::Arxiv => academic::arxiv(&fetcher, &query, limit).await,
+                    Provider::OpenAlex => {
+                        academic::openalex(&fetcher, &query, limit, contact.as_deref()).await
+                    }
+                    Provider::Crossref => {
+                        academic::crossref(&fetcher, &query, limit, contact.as_deref()).await
+                    }
                     Provider::Wikipedia(lang) => {
                         wikipedia::search(&fetcher, &query, lang, limit).await
                     }
@@ -339,6 +367,14 @@ mod tests {
 
     fn hit(url: &str) -> RawHit {
         RawHit { title: "T".into(), url: url.into(), snippet: "s".into() }
+    }
+
+    #[test]
+    fn academic_provider_specs_parse() {
+        assert_eq!(Provider::parse("arxiv").unwrap(), Provider::Arxiv);
+        assert_eq!(Provider::parse("OpenAlex").unwrap(), Provider::OpenAlex);
+        assert_eq!(Provider::parse("crossref").unwrap(), Provider::Crossref);
+        assert_eq!(Provider::parse("arxiv").unwrap().name(), "arxiv");
     }
 
     #[test]

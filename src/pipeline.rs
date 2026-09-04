@@ -170,6 +170,7 @@ mod tests {
                 providers: vec![Provider::Wikipedia("ko".into())],
                 limit: 3,
                 per_provider: 5,
+                contact_email: None,
             })
             .slim(SlimConfig::with_budget(512))
             .build()

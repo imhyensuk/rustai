@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Scholarly providers**: `arxiv`, `openalex` and `crossref`, all keyless and
+  free. OpenAlex abstracts are stored as an inverted index and are reconstructed
+  into readable text; arXiv results point at abstract pages rather than PDFs.
+  `contact_email` opts into the OpenAlex/Crossref polite pool.
+- `extract_many` in the Python API: batch denoising across the rayon pool with
+  the GIL released. ~4x a loop over `extract`, ~30x `trafilatura`.
+
+### Fixed
+
+- **Extraction on pages that defeat the HTML parser.** `tl` does not insert the
+  implied end tags a browser would, so an unclosed `<p>`, `<span>`, `<li>` or
+  `<table>` can end up owning the rest of the document — and on one real
+  Wikipedia article it did, producing a single 54,000-token "paragraph"
+  containing the whole page. Four guards now hold, each of which is also just
+  correct on well-formed markup:
+  - an element is only inline if it carries no block-level content;
+  - a `<p>`, `<li>` or `<blockquote>` holding blocks is walked, not flattened;
+  - a `<table>` holding headings or sections is laid out, not tabulated;
+  - a node holding the majority of a document's text is never boilerplate,
+    whatever its class or `role` says.
+- **Subtree size was misreported.** `text_ratio`, one of the three headline
+  denoising signals, read `tl`'s per-tag source slice — which collapses to the
+  opening tag alone when the parser cannot match a close, reporting 28 bytes for
+  an element holding 180 KB. Markup weight is now accumulated directly.
+- The boilerplate vocabulary missed plurals: `reference` did not match
+  `references`, so Wikipedia citation lists survived and ate context budgets.
+  High-precision terms are now conclusive at any size, since a reference list or
+  comment thread runs far past the length guard that keeps the rest honest.
+- HTML-level redirects (`<meta http-equiv="refresh">` and `location.replace`)
+  are now followed, bounded to two hops and gated on a zero delay and a small
+  body. Sites that canonicalise URLs in the browser previously extracted to
+  nothing — they returned a valid `200` whose body was a redirect stub.
+
 ## [0.1.0] — 2026-09-04
 
 First release.

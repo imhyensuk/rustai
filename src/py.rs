@@ -582,6 +582,7 @@ impl PyClient {
         max_body_bytes = 8 * 1024 * 1024,
         accept_language = "en-US,en;q=0.9",
         browser_fallback = false,
+        contact_email = None,
         max_tokens = 2048,
         diversity = 0.35,
         include_links = true,
@@ -601,6 +602,7 @@ impl PyClient {
         max_body_bytes: usize,
         accept_language: &str,
         browser_fallback: bool,
+        contact_email: Option<String>,
         max_tokens: usize,
         diversity: f32,
         include_links: bool,
@@ -645,7 +647,7 @@ impl PyClient {
 
         let pipeline = Pipeline::builder()
             .fetch(fetch)
-            .search(SearchConfig { providers, limit, per_provider: limit.max(10) })
+            .search(SearchConfig { providers, limit, per_provider: limit.max(10), contact_email })
             .extract(ExtractOptions {
                 render: RenderOptions { include_links, include_images, include_tables },
                 denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
@@ -756,6 +758,56 @@ fn extract(
     Ok(PyArticle { inner })
 }
 
+/// Denoise many HTML strings at once, in parallel across the rayon pool.
+///
+/// This is the batch form of [`extract`]. Parsing is CPU-bound and per-document
+/// independent, so a list of 20 documents costs roughly one document's wall
+/// time on a multi-core machine — and because the GIL is released for the whole
+/// call, it parallelises whether or not the caller uses threads.
+///
+/// `urls` is optional; when given it must be the same length as `documents`.
+/// Output is 1:1 with the input, so a failed document raises rather than
+/// silently shifting every later index.
+#[pyfunction]
+#[pyo3(signature = (documents, urls = None, *, include_links = true, include_images = false, include_tables = true))]
+fn extract_many(
+    py: Python<'_>,
+    documents: Vec<String>,
+    urls: Option<Vec<Option<String>>>,
+    include_links: bool,
+    include_images: bool,
+    include_tables: bool,
+) -> PyResult<Vec<PyArticle>> {
+    if let Some(urls) = &urls
+        && urls.len() != documents.len()
+    {
+        return Err(PyValueError::new_err(format!(
+            "urls has {} entries but documents has {}",
+            urls.len(),
+            documents.len()
+        )));
+    }
+    let opts = ExtractOptions {
+        render: RenderOptions { include_links, include_images, include_tables },
+        denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
+        ..ExtractOptions::new()
+    };
+
+    let results = py.detach(|| {
+        let pairs: Vec<(&str, Option<&str>)> = documents
+            .iter()
+            .enumerate()
+            .map(|(i, html)| {
+                let url = urls.as_ref().and_then(|u| u[i].as_deref());
+                (html.as_str(), url)
+            })
+            .collect();
+        crate::parse::extract_many(pairs, &opts)
+    });
+
+    results.into_iter().map(|r| r.map(|inner| PyArticle { inner }).map_err(PyErr::from)).collect()
+}
+
 /// Rank and compress already-extracted articles into a context window.
 #[pyfunction]
 #[pyo3(signature = (query, articles, *, max_tokens = 2048, diversity = 0.35, max_tokens_per_source = None, include_breadcrumbs = true))]
@@ -785,7 +837,8 @@ fn slim(
 
 /// Search, read and compress in one call, using a throwaway client.
 #[pyfunction]
-#[pyo3(signature = (query, *, max_sources = 5, max_tokens = 2048, providers = None, impersonate = "chrome", respect_robots = true))]
+#[pyo3(signature = (query, *, max_sources = 5, max_tokens = 2048, providers = None, impersonate = "chrome", respect_robots = true, contact_email = None))]
+#[allow(clippy::too_many_arguments)]
 fn research(
     py: Python<'_>,
     query: &str,
@@ -794,6 +847,7 @@ fn research(
     providers: Option<Vec<String>>,
     impersonate: &str,
     respect_robots: bool,
+    contact_email: Option<String>,
 ) -> PyResult<PyResearch> {
     let client = PyClient::new(
         providers,
@@ -806,6 +860,7 @@ fn research(
         8 * 1024 * 1024,
         "en-US,en;q=0.9",
         false,
+        contact_email,
         max_tokens,
         0.35,
         true,
@@ -869,6 +924,7 @@ pub fn rustai_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyResearch>()?;
 
     m.add_function(wrap_pyfunction!(extract, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_many, m)?)?;
     m.add_function(wrap_pyfunction!(slim, m)?)?;
     m.add_function(wrap_pyfunction!(research, m)?)?;
     m.add_function(wrap_pyfunction!(count_tokens, m)?)?;

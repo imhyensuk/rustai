@@ -113,6 +113,36 @@ class TestUnits:
         assert article.tokens == sum(u.tokens for u in article.units)
 
 
+class TestExtractMany:
+    def test_matches_the_serial_path(self):
+        docs = [ARTICLE, ARTICLE.replace("Zero-cost", "Low-cost"), "<article><p>" + "x " * 40 + "</p></article>"]
+        batch = rustai.extract_many(docs)
+        serial = [rustai.extract(d) for d in docs]
+        assert [a.markdown for a in batch] == [a.markdown for a in serial]
+
+    def test_output_is_one_to_one_with_input(self):
+        docs = [ARTICLE, "", "   ", "<html></html>"]
+        assert len(rustai.extract_many(docs)) == len(docs)
+
+    def test_urls_are_applied_positionally(self):
+        docs = [ARTICLE, ARTICLE]
+        arts = rustai.extract_many(docs, ["https://a.dev/1", None])
+        assert arts[0].url == "https://a.dev/1"
+        assert arts[1].url is None
+        assert "(https://a.dev/docs/guide)" in arts[0].markdown
+
+    def test_length_mismatch_is_rejected(self):
+        with pytest.raises(ValueError, match="urls has"):
+            rustai.extract_many([ARTICLE, ARTICLE], ["https://a.dev/1"])
+
+    def test_render_options_are_honoured(self):
+        arts = rustai.extract_many([ARTICLE], include_tables=False)
+        assert "| Tool | RSS |" not in arts[0].markdown
+
+    def test_empty_input(self):
+        assert rustai.extract_many([]) == []
+
+
 class TestEdgeCases:
     @pytest.mark.parametrize("html", ["", "   ", "<html></html>", "not html at all"])
     def test_degenerate_input_does_not_raise(self, html):

@@ -36,6 +36,12 @@ pub const DEFAULT_USER_AGENT: &str =
 /// The token we match `robots.txt` groups against.
 pub const ROBOTS_AGENT: &str = "rustai";
 
+/// HTML-level redirects followed before giving up.
+///
+/// Two is enough for the real pattern (a canonicalising stub pointing at the
+/// article) and low enough that a redirect loop costs almost nothing.
+const MAX_HTML_REDIRECTS: usize = 2;
+
 /// Content types we are willing to parse as a document.
 const TEXTUAL: &[&str] = &[
     "text/html",
@@ -252,22 +258,29 @@ impl Fetcher {
         self.pace(&parsed, crawl_delay).await;
 
         let started = Instant::now();
-        let mut attempt = 0u32;
-        let page = loop {
-            match self.get_once(&parsed).await {
-                Ok(page) => break page,
-                Err(e) if e.is_retryable() && attempt < self.cfg.retries => {
-                    // Exponential backoff. Retrying a 429 immediately is how a
-                    // client turns a soft limit into a hard block.
-                    let wait = self.cfg.retry_backoff * 2u32.pow(attempt);
-                    tokio::time::sleep(wait).await;
-                    attempt += 1;
-                }
-                Err(e) => return Err(e),
-            }
-        };
+        let mut page = self.get_with_retry(&parsed).await?;
 
-        let mut page = page;
+        // Follow HTML-level redirects. `wreq` follows HTTP 3xx, but a stub page
+        // that redirects via `<meta refresh>` or `location.replace` returns a
+        // perfectly good 200 containing no content — which is exactly what
+        // happens on sites that canonicalise URLs in the browser.
+        let mut current = parsed.clone();
+        for _ in 0..MAX_HTML_REDIRECTS {
+            let Some(next) = detect_html_redirect(&page.body, &current) else { break };
+            if check_robots && !self.robots_for(&next).await.allows(next.path()) {
+                break;
+            }
+            self.pace(&next, crawl_delay).await;
+            match self.get_with_retry(&next).await {
+                Ok(followed) => {
+                    page = followed;
+                    current = next;
+                }
+                // The stub is still a better answer than an error.
+                Err(_) => break,
+            }
+        }
+        page.url = parsed.to_string();
         page.elapsed_ms = started.elapsed().as_millis() as u64;
 
         if self.cfg.browser_fallback && needs_javascript(&page) {
@@ -293,6 +306,24 @@ impl Fetcher {
             async move { this.fetch(&u).await }
         });
         futures_util::stream::iter(futures).buffered(self.cfg.concurrency).collect::<Vec<_>>().await
+    }
+
+    /// One URL, with exponential backoff on retryable failures.
+    async fn get_with_retry(&self, url: &Url) -> Result<Page> {
+        let mut attempt = 0u32;
+        loop {
+            match self.get_once(url).await {
+                Ok(page) => return Ok(page),
+                Err(e) if e.is_retryable() && attempt < self.cfg.retries => {
+                    // Retrying a 429 immediately is how a client turns a soft
+                    // limit into a hard block.
+                    let wait = self.cfg.retry_backoff * 2u32.pow(attempt);
+                    tokio::time::sleep(wait).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     async fn get_once(&self, url: &Url) -> Result<Page> {
@@ -516,6 +547,82 @@ fn sniff_meta_charset(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Find an HTML-level redirect target in a page body.
+///
+/// Two forms matter in practice: `<meta http-equiv="refresh" content="0; url=…">`
+/// and a script that assigns `location`. Both are gated on the page being small
+/// and on a zero delay, because a redirect stub is always tiny — a long article
+/// that happens to contain `location.href` somewhere must not be mistaken for
+/// one.
+fn detect_html_redirect(body: &str, base: &Url) -> Option<Url> {
+    const MAX_STUB_BYTES: usize = 4096;
+    if body.len() > MAX_STUB_BYTES {
+        return None;
+    }
+    let target = meta_refresh_target(body).or_else(|| script_location_target(body))?;
+    let next = base.join(target.trim().trim_matches(['"', '\''])).ok()?;
+    if !matches!(next.scheme(), "http" | "https") {
+        return None;
+    }
+    // A stub pointing at itself is a loop, not a redirect.
+    let same = next.as_str().trim_end_matches('/') == base.as_str().trim_end_matches('/');
+    (!same).then_some(next)
+}
+
+/// `<meta http-equiv="refresh" content="0; url=TARGET">`, delay 0 only.
+fn meta_refresh_target(body: &str) -> Option<&str> {
+    let lower = body.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(at) = lower[from..].find("http-equiv") {
+        let tag_start = lower[..from + at].rfind('<')?;
+        let tag_end = lower[tag_start..].find('>')? + tag_start;
+        let tag = &lower[tag_start..tag_end];
+        if tag.contains("refresh")
+            && let Some(content_at) = tag.find("content")
+            && let Some(url_at) = tag[content_at..].find("url=")
+        {
+            // Only an immediate redirect; a delayed one is a page in its own right.
+            let delay: String = tag[content_at..]
+                .chars()
+                .skip_while(|c| !c.is_ascii_digit())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if delay.parse::<u32>().unwrap_or(0) == 0 {
+                let start = tag_start + content_at + url_at + 4;
+                let rest = &body[start..];
+                let end = rest.find(['"', '\'', '>']).unwrap_or(rest.len());
+                let target = rest[..end].trim();
+                if !target.is_empty() {
+                    return Some(target);
+                }
+            }
+        }
+        from += at + "http-equiv".len();
+    }
+    None
+}
+
+/// `location.replace("TARGET")`, `location.href = "TARGET"`, and friends.
+fn script_location_target(body: &str) -> Option<&str> {
+    for marker in ["location.replace(", "location.href=", "location.href =", "location.assign("] {
+        let Some(at) = body.find(marker) else { continue };
+        let rest = &body[at + marker.len()..];
+        let rest = rest.trim_start();
+        let quote = rest.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            // An indirection through a variable; resolving it needs a JS engine.
+            continue;
+        }
+        let inner = &rest[quote.len_utf8()..];
+        let end = inner.find(quote)?;
+        let target = &inner[..end];
+        if target.starts_with("http") || target.starts_with('/') {
+            return Some(target);
+        }
+    }
+    None
+}
+
 /// Does this response look like an empty shell waiting for JavaScript?
 ///
 /// Deliberately conservative. Rendering a page costs ~100x a fetch, so the
@@ -610,6 +717,89 @@ mod tests {
             elapsed_ms: 0,
             rendered: false,
         }
+    }
+
+    #[test]
+    fn follows_a_meta_refresh_stub() {
+        let base = Url::parse("https://blog.dev/2024/02/08/Post.html").unwrap();
+        let body = r#"<!doctype html><title>Redirect</title>
+            <noscript><meta http-equiv="refresh" content="0; url=https://blog.dev/2024/02/08/Post/"></noscript>"#;
+        assert_eq!(
+            detect_html_redirect(body, &base).unwrap().as_str(),
+            "https://blog.dev/2024/02/08/Post/"
+        );
+    }
+
+    #[test]
+    fn follows_a_script_location_stub() {
+        let base = Url::parse("https://blog.dev/a.html").unwrap();
+        let body = r#"<!doctype html><title>Redirect</title><script>
+            const target = "https://blog.dev/a/";
+            window.location.replace("https://blog.dev/a/");
+        </script>"#;
+        assert_eq!(detect_html_redirect(body, &base).unwrap().as_str(), "https://blog.dev/a/");
+    }
+
+    #[test]
+    fn resolves_a_relative_redirect_target() {
+        let base = Url::parse("https://blog.dev/x/a.html").unwrap();
+        let body = r#"<meta http-equiv="refresh" content="0;url=/y/b.html">"#;
+        assert_eq!(
+            detect_html_redirect(body, &base).unwrap().as_str(),
+            "https://blog.dev/y/b.html"
+        );
+    }
+
+    #[test]
+    fn ignores_delayed_refreshes_and_self_loops() {
+        let base = Url::parse("https://blog.dev/a").unwrap();
+        // A 5-second refresh is a real page that reloads, not a redirect.
+        assert!(
+            detect_html_redirect(
+                r#"<meta http-equiv="refresh" content="5; url=https://blog.dev/b">"#,
+                &base
+            )
+            .is_none()
+        );
+        // Pointing at itself is a loop.
+        assert!(
+            detect_html_redirect(
+                r#"<meta http-equiv="refresh" content="0; url=https://blog.dev/a">"#,
+                &base
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ignores_a_long_page_that_merely_mentions_location() {
+        let base = Url::parse("https://blog.dev/a").unwrap();
+        let article = format!(
+            "<article><p>{}</p><p>You can call location.replace(\"https://evil.dev/\") in JS.</p></article>",
+            "Real prose. ".repeat(500)
+        );
+        assert!(
+            detect_html_redirect(&article, &base).is_none(),
+            "a full article was treated as a stub"
+        );
+    }
+
+    #[test]
+    fn ignores_non_http_and_unresolvable_targets() {
+        let base = Url::parse("https://blog.dev/a").unwrap();
+        assert!(
+            detect_html_redirect(
+                r#"<meta http-equiv="refresh" content="0;url=javascript:x()">"#,
+                &base
+            )
+            .is_none()
+        );
+        assert!(detect_html_redirect("<p>nothing here</p>", &base).is_none());
+        // A variable indirection needs a JS engine; we must not guess.
+        assert!(
+            detect_html_redirect(r#"<script>window.location.replace(target);</script>"#, &base)
+                .is_none()
+        );
     }
 
     #[test]

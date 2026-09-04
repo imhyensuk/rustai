@@ -14,6 +14,14 @@ use rayon::prelude::*;
 use url::Url;
 
 use crate::denoise::{DenoiseConfig, DenoiseStats};
+
+/// Below this much body text, the ratio check is noise — short pages routinely
+/// extract a small absolute number of characters and are perfectly fine.
+const MIN_BODY_FOR_RATIO_CHECK: usize = 2_000;
+
+/// Extracting less than this share of the document's visible text means the
+/// content root is almost certainly wrong.
+const STARVED_PERCENT: usize = 5;
 use crate::error::Result;
 use crate::text;
 
@@ -176,19 +184,31 @@ pub fn extract_with(html: &str, url: Option<&str>, opts: &ExtractOptions) -> Res
     let mut writer = markdown::Writer::new(&doc, &opts.denoise, &opts.render, base.clone());
     writer.walk(root);
 
-    // Scoring can land on a sidebar when the real body is unusually structured.
-    // Retrying from `<body>` costs one more walk and rescues those pages.
-    let thin = writer.units.iter().map(|u| text::visible_len(&u.text)).sum::<usize>()
-        < opts.min_content_chars;
-    if thin
+    // Content-root scoring can land in the wrong subtree — on a sidebar, or
+    // inside a maintenance banner that a lenient parser accidentally nested the
+    // whole article into. Two signals say we got it wrong: almost nothing came
+    // out at all, or what came out is a rounding error next to the text the
+    // document actually contains.
+    let extracted = |w: &markdown::Writer<'_, '_>| -> usize {
+        w.units.iter().map(|u| text::visible_len(&u.text)).sum()
+    };
+    let current_len = extracted(&writer);
+    let body_text = body.map(|b| doc.text_len(b)).unwrap_or(0) as usize;
+    let starved =
+        body_text > MIN_BODY_FOR_RATIO_CHECK && current_len * 100 < body_text * STARVED_PERCENT;
+
+    if (current_len < opts.min_content_chars || starved)
         && let Some(body) = body
         && body != root
     {
         let mut fallback = markdown::Writer::new(&doc, &opts.denoise, &opts.render, base);
         fallback.walk(body);
-        let fallback_len: usize = fallback.units.iter().map(|u| text::visible_len(&u.text)).sum();
-        let current_len: usize = writer.units.iter().map(|u| text::visible_len(&u.text)).sum();
-        if fallback_len > current_len {
+        let fallback_len = extracted(&fallback);
+        // Walking `<body>` always sweeps up more boilerplate, so it only wins
+        // when it is dramatically better — not merely bigger.
+        let decisively_better = fallback_len > current_len.saturating_mul(3);
+        if fallback_len > current_len && (current_len < opts.min_content_chars || decisively_better)
+        {
             writer = fallback;
         }
     }
@@ -290,6 +310,99 @@ mod tests {
         // The nav and footer live outside the article and must still be counted.
         assert!(art.stats.nodes_dropped > 0, "{:?}", art.stats);
         assert!(art.stats.nodes_dropped < art.stats.nodes_visited);
+    }
+
+    #[test]
+    fn an_unclosed_paragraph_does_not_swallow_the_document() {
+        // HTML implies `</p>` before a block-level start tag. Lenient parsers
+        // do not insert it, so without a guard the whole page becomes one
+        // paragraph. This is the shape real pages hit it with.
+        let html = "<article><p>Intro sentence that runs on                    <h2>A real heading</h2>                    <p>A second paragraph with enough words in it to be kept.</p>                    <h2>Another heading</h2>                    <p>A third paragraph, also long enough to survive the filter.</p>                    </article>";
+        let art = extract(html, None).unwrap();
+        assert!(
+            art.units.len() >= 4,
+            "collapsed into {} units:\n{}",
+            art.units.len(),
+            art.markdown
+        );
+        assert!(art.markdown.contains("## A real heading"));
+        assert!(art.markdown.contains("## Another heading"));
+        let biggest = art.units.iter().map(|u| u.tokens).max().unwrap();
+        assert!(biggest < 60, "one unit swallowed the rest: {biggest} tokens");
+    }
+
+    #[test]
+    fn an_inline_element_holding_blocks_does_not_flatten_the_page() {
+        // The shape an unclosed `<span>` produces: an inline tag that has taken
+        // ownership of the rest of the document. Flattening it would emit the
+        // whole page as a single paragraph with no headings at all.
+        //
+        // The filler is sized past `INLINE_INSPECT_BYTES` on purpose. Below
+        // that the guard deliberately does not run: a sub-2 KB span that
+        // flattens is a cosmetic wrinkle, while the descendant walk on every
+        // small `<a>` and `<strong>` would be a real cost on every document.
+        let filler = "Real prose that carries the paragraph past the length filter. ".repeat(20);
+        let html = format!(
+            "<article><div class=\"notice\"><span>Notice text.\
+             <h2>First section</h2><p>{filler}</p>\
+             <h2>Second section</h2><p>{filler}</p></span></div></article>"
+        );
+        let art = extract(&html, None).unwrap();
+        assert!(art.markdown.contains("## First section"), "headings lost:\n{}", art.markdown);
+        assert!(art.markdown.contains("## Second section"));
+        // Two headings and two paragraphs, not one merged blob.
+        assert!(
+            art.units.len() >= 4,
+            "collapsed into {} units:\n{}",
+            art.units.len(),
+            art.markdown
+        );
+    }
+
+    #[test]
+    fn a_list_item_holding_blocks_keeps_their_structure() {
+        let prose = "Real prose inside a list item, long enough to survive the filter. ";
+        let html = format!(
+            "<article><ul><li>Bullet text\
+             <h2>A heading inside the item</h2><p>{prose}</p>\
+             <ul><li>Nested bullet</li></ul></li></ul></article>"
+        );
+        let art = extract(&html, None).unwrap();
+        assert!(art.markdown.contains("- Bullet text"));
+        assert!(art.markdown.contains("## A heading inside the item"), "{}", art.markdown);
+        assert!(art.markdown.contains("- Nested bullet"));
+        let biggest = art.units.iter().map(|u| u.tokens).max().unwrap();
+        assert!(biggest < 40, "the item swallowed its blocks: {biggest} tokens");
+    }
+
+    #[test]
+    fn small_inline_elements_stay_inline() {
+        let html = "<article><p>A sentence with <strong>bold</strong> and                     <em>italic</em> and <code>code</code> in it, long enough to keep.</p></article>";
+        let art = extract(html, None).unwrap();
+        assert_eq!(art.units.len(), 1, "inline runs were split:\n{}", art.markdown);
+        assert!(art.markdown.contains("**bold**"));
+        assert!(art.markdown.contains("*italic*"));
+        assert!(art.markdown.contains("`code`"));
+    }
+
+    #[test]
+    fn a_layout_table_is_walked_not_tabulated() {
+        // Navboxes, page shells and unclosed tables all look like this: block
+        // content inside cells. Rendering it as a pipe table would produce one
+        // giant unreadable row.
+        let html = "<table><tr><td>                    <h1>Page title</h1>                    <p>A paragraph of real prose that is long enough to keep around.</p>                    <h2>Section</h2>                    <p>Another paragraph of real prose, also long enough to keep.</p>                    </td></tr></table>";
+        let art = extract(html, None).unwrap();
+        assert!(!art.units.iter().any(|u| u.kind == UnitKind::Table), "{}", art.markdown);
+        assert!(art.markdown.contains("# Page title"));
+        assert!(art.markdown.contains("## Section"));
+    }
+
+    #[test]
+    fn a_real_data_table_is_still_tabulated() {
+        let html = "<article><p>Some prose introducing the numbers below it.</p>                    <table><tr><th>Engine</th><th>RSS</th></tr>                    <tr><td>arena</td><td>4.8 MiB</td></tr></table></article>";
+        let art = extract(html, None).unwrap();
+        assert!(art.markdown.contains("| Engine | RSS |"), "{}", art.markdown);
+        assert!(art.units.iter().any(|u| u.kind == UnitKind::Table));
     }
 
     #[test]

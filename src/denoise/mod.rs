@@ -30,6 +30,20 @@ pub const DROP_TAGS: &[&str] = &[
 /// Tags that are boilerplate by definition in the HTML5 outline.
 pub const CHROME_TAGS: &[&str] = &["nav", "footer", "aside", "menu"];
 
+/// Class/id tokens that justify dropping a subtree **at any size**.
+///
+/// The vocabulary below is high-precision: nothing here is ever the article. A
+/// reference list or a comment thread can run to thousands of characters, so
+/// the size guard that protects [`NEGATIVE`] from false positives would let
+/// them straight through — and a Wikipedia citation list will happily eat a
+/// whole context budget.
+static CONCLUSIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(^|[-_\s])(ads?|adbox|advert|advertisement|sponsors?|sponsored|promos?|promotions?|banners?|popups?|modals?|overlays?|interstitials?|cookies?|consent|gdpr|newsletters?|subscribe|signup|paywall|shares?|sharing|socials?|comments?|disqus|livefyre|related|recommend|recommended|recirc|outbrain|taboola|trending|breadcrumbs?|pagination|pagers?|navbars?|navigation|navbox|navboxes|masthead|footers?|toolbars?|skip|sr-only|screen-reader|visually-hidden|noprint|references?|reference-list|reflist|refbegin|refend|citations?|footnotes?|catlinks|authority-control|mw-editsection|mw-references|printfooter|sitesub|jump-link|mw-jump-link)([-_\s]|$)",
+    )
+    .expect("static conclusive regex")
+});
+
 static NEGATIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(^|[-_\s])(ad|ads|adbox|advert|advertisement|sponsor|sponsored|promo|promotion|banner|popup|modal|overlay|interstitial|cookie|consent|gdpr|newsletter|subscribe|signup|paywall|share|sharing|social|follow|comment|comments|disqus|livefyre|reply|sidebar|side-bar|widget|related|recommend|recirc|outbrain|taboola|trending|popular|breadcrumb|pagination|pager|paging|nav|navbar|navigation|menu|masthead|footer|header|topbar|toolbar|utility|skip|hidden|invisible|screen-reader|sr-only|visually-hidden|meta|byline|tags|tag-list|author-box|bio|cta|newsl|toc|table-of-contents|infobox|navbox|metadata|mw-editsection|reference|citation|footnote)([-_\s]|$)",
@@ -110,7 +124,7 @@ pub(crate) fn class_weight(doc: &Doc<'_>, id: Id) -> f32 {
         return 0.0;
     }
     let mut w = 0.0;
-    if NEGATIVE.is_match(&sig) {
+    if NEGATIVE.is_match(&sig) || CONCLUSIVE.is_match(&sig) {
         w -= 25.0;
     }
     if POSITIVE.is_match(&sig) {
@@ -143,6 +157,13 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     {
         return true;
     }
+    // Past this point every rule is a heuristic about *where* content usually
+    // is not. None of them may overrule the arithmetic fact that this node
+    // holds most of the page.
+    if doc.is_dominant(id) {
+        return false;
+    }
+
     if matches!(
         doc.attr(id, "role").as_deref(),
         Some(
@@ -160,11 +181,18 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
 
     let text = doc.text_len(id);
 
-    // A class/id match is suggestive, not conclusive: `<div id="main-content">`
-    // and `<div class="content-ad">` both match something, so require the node
-    // to also look thin before dropping it on the vocabulary alone.
-    if cfg.drop_by_class && class_weight(doc, id) < 0.0 && text < 400 {
-        return true;
+    if cfg.drop_by_class {
+        let sig = doc.signature(id);
+        // High-precision vocabulary: never the article, whatever its size.
+        if CONCLUSIVE.is_match(&sig) && !POSITIVE.is_match(&sig) {
+            return true;
+        }
+        // The rest is suggestive, not conclusive: `<div id="main-content">` and
+        // `<div class="content-ad">` both match something, so require the node
+        // to also look thin before dropping it on the vocabulary alone.
+        if class_weight(doc, id) < 0.0 && text < 400 {
+            return true;
+        }
     }
 
     // Link farms. Headings and list items legitimately run link-heavy, so only
@@ -321,6 +349,90 @@ mod tests {
         let doc = Doc::parse(PAGE).unwrap();
         let cfg = DenoiseConfig::default();
         assert!(!is_noise(&doc, id_of(&doc, "post-content"), &cfg));
+    }
+
+    #[test]
+    fn large_reference_and_comment_blocks_are_dropped() {
+        // Wikipedia's citation list is `<ol class="mw-references references">` and
+        // runs to thousands of characters — far past the size guard that keeps
+        // the suggestive vocabulary honest.
+        let long = "Author, A. (2020). Some paper title here. Journal of Things. ".repeat(40);
+        let html = format!(
+            r#"<html><body><div id="content">
+                 <p>{long}</p>
+                 <ol class="mw-references references"><li>{long}</li></ol>
+                 <div class="comments"><p>{long}</p></div>
+                 <section class="related-articles"><p>{long}</p></section>
+               </div></body></html>"#
+        );
+        let doc = Doc::parse(&html).unwrap();
+        let cfg = DenoiseConfig::default();
+        for sig in ["mw-references", "comments", "related-articles"] {
+            assert!(is_noise(&doc, id_of(&doc, sig), &cfg), "{sig} survived at full size");
+        }
+    }
+
+    #[test]
+    fn plural_class_names_are_matched() {
+        // The article has to be present and larger, or the dominance rule
+        // correctly refuses to call the only content on the page boilerplate.
+        let prose = "Real article prose that runs well past any length filter here. ".repeat(30);
+        for sig in ["references", "citations", "footnotes", "comments", "ads", "related"] {
+            let html = format!(
+                r#"<html><body><article class="post"><p>{prose}</p></article>
+                   <div class="{sig}"><p>some boilerplate text</p></div></body></html>"#
+            );
+            let doc = Doc::parse(&html).unwrap();
+            assert!(
+                is_noise(&doc, id_of(&doc, sig), &DenoiseConfig::default()),
+                "class {sig:?} was not recognised"
+            );
+        }
+    }
+
+    #[test]
+    fn a_positive_class_overrides_the_conclusive_list() {
+        // `article-share-content` should not be dropped just because it says
+        // "share": an explicit content marker wins.
+        let html = r#"<html><body><div class="share entry-content"><p>Real prose that is long enough to matter here.</p></div></body></html>"#;
+        let doc = Doc::parse(html).unwrap();
+        assert!(!is_noise(&doc, id_of(&doc, "entry-content"), &DenoiseConfig::default()));
+    }
+
+    #[test]
+    fn a_node_holding_the_whole_page_is_never_boilerplate() {
+        // The shape a lenient parser produces when it cannot close a tag: the
+        // entire article ends up inside a navigation element. Dropping it on
+        // the class name would discard the page.
+        let prose = "Real article prose that carries the paragraph well past any length filter. "
+            .repeat(30);
+        let html = format!(
+            r#"<html><body>
+                 <table class="sidebar nomobile" role="navigation"><tr><td>
+                   <h1>The article</h1><p>{prose}</p>
+                 </td></tr></table>
+               </body></html>"#
+        );
+        let doc = Doc::parse(&html).unwrap();
+        let sidebar = id_of(&doc, "sidebar");
+        assert!(doc.is_dominant(sidebar));
+        assert!(!is_noise(&doc, sidebar, &DenoiseConfig::default()), "the page was discarded");
+    }
+
+    #[test]
+    fn a_genuine_sidebar_is_still_dropped() {
+        let prose =
+            "Real article prose that carries the paragraph past any length filter. ".repeat(30);
+        let html = format!(
+            r#"<html><body>
+                 <article class="post"><h1>T</h1><p>{prose}</p></article>
+                 <aside class="sidebar" role="navigation"><a href="/1">One</a><a href="/2">Two</a></aside>
+               </body></html>"#
+        );
+        let doc = Doc::parse(&html).unwrap();
+        let aside = id_of(&doc, "sidebar");
+        assert!(!doc.is_dominant(aside));
+        assert!(is_noise(&doc, aside, &DenoiseConfig::default()));
     }
 
     #[test]

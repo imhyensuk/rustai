@@ -173,6 +173,7 @@ class Client:
         max_body_bytes: int = 8388608,
         accept_language: str = "en-US,en;q=0.9",
         browser_fallback: bool = False,
+        contact_email: str | None = None,
         max_tokens: int = 2048,
         diversity: float = 0.35,
         include_links: bool = True,
@@ -197,6 +198,14 @@ def extract(
     include_images: bool = False,
     include_tables: bool = True,
 ) -> Article: ...
+def extract_many(
+    documents: Sequence[str],
+    urls: Sequence[str | None] | None = None,
+    *,
+    include_links: bool = True,
+    include_images: bool = False,
+    include_tables: bool = True,
+) -> list[Article]: ...
 def slim(
     query: str,
     articles: Sequence[Article],
@@ -214,6 +223,7 @@ def research(
     providers: Sequence[str] | None = None,
     impersonate: str = "chrome",
     respect_robots: bool = True,
+    contact_email: str | None = None,
 ) -> Research: ...
 def count_tokens(text: str) -> int: ...
 def tokenize(text: str) -> list[str]: ...

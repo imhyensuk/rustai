@@ -90,6 +90,60 @@ class TestSearch:
         assert hits == sorted(hits, key=lambda h: -h.score)
 
 
+class TestAcademicProviders:
+    """The scholarly sources: free, keyless, and the reason a web search is not enough."""
+
+    @pytest.mark.parametrize("provider", ["arxiv", "openalex", "crossref"])
+    def test_returns_scholarly_results(self, provider):
+        c = rustai.Client(
+            providers=[provider], contact_email="you@example.com", timeout=30.0
+        )
+        hits = c.search("attention is all you need transformer", strict=True)
+        assert len(hits) >= 3
+        assert all(h.url.startswith("http") for h in hits)
+        assert all(h.title for h in hits)
+        assert all(provider in h.providers for h in hits)
+
+    def test_arxiv_links_to_abstracts_not_pdfs(self):
+        c = rustai.Client(providers=["arxiv"], timeout=30.0)
+        hits = c.search("transformer architecture", strict=True)
+        # A PDF cannot be denoised by this pipeline, so the abstract page is
+        # the only useful target.
+        assert all("/abs/" in h.url for h in hits), [h.url for h in hits]
+        assert not any("/pdf/" in h.url for h in hits)
+
+    def test_openalex_reconstructs_abstracts(self):
+        c = rustai.Client(
+            providers=["openalex"], contact_email="you@example.com", timeout=30.0
+        )
+        hits = c.search("BERT language model pre-training", strict=True)
+        assert any(len(h.snippet) > 200 for h in hits), "no abstract was reconstructed"
+
+    def test_academic_and_web_results_fuse(self):
+        c = rustai.Client(
+            providers=["arxiv", "openalex", "wikipedia:en"],
+            contact_email="you@example.com",
+            timeout=30.0,
+        )
+        hits = c.search("Okapi BM25 ranking")
+        assert hits
+        assert len({p for h in hits for p in h.providers}) >= 2
+
+
+class TestHtmlRedirects:
+    def test_follows_a_meta_refresh_stub(self):
+        """This URL serves a 200 whose body is a JS/meta-refresh redirect."""
+        c = rustai.Client(timeout=30.0)
+        page = c.fetch(
+            ["https://blog.rust-lang.org/2024/02/08/Rust-1.76.0.html"],
+            raise_on_error=True,
+        )[0]
+        assert page.final_url.endswith("/Rust-1.76.0/"), page.final_url
+        article = page.extract()
+        assert article.tokens > 300, "the redirect stub was returned instead of the post"
+        assert "1.76" in (article.title or "")
+
+
 class TestResearch:
     def test_end_to_end(self, client):
         result = client.research("what is the BM25 ranking function", max_sources=3)

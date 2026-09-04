@@ -18,6 +18,14 @@ The three things you will use most::
 
     # 3. Offline: turn HTML you already have into clean Markdown.
     article = rustai.extract(html, url="https://example.com/post")
+    articles = rustai.extract_many(list_of_html)   # parallel across every core
+
+Scholarly sources are first-class alongside web search::
+
+    client = rustai.Client(
+        providers=["arxiv", "openalex", "crossref", "duckduckgo"],
+        contact_email="you@example.com",   # OpenAlex/Crossref polite pool
+    )
 
 Everything blocking releases the GIL, so these calls parallelise across threads.
 """
@@ -44,6 +52,7 @@ from ._rustai import (
     count_tokens,
     density,
     extract,
+    extract_many,
     parse_feed,
     parse_sitemap,
     research,
@@ -73,6 +82,7 @@ __all__ = [
     "count_tokens",
     "density",
     "extract",
+    "extract_many",
     "parse_feed",
     "parse_sitemap",
     "research",
