@@ -1,0 +1,482 @@
+//! Markdown writer.
+//!
+//! The output is deliberately plain — ATX headings, `-` bullets, fenced code,
+//! pipe tables — because it is fed to a small local model, not rendered. Every
+//! block becomes a [`Unit`], which is the granularity the context slimmer
+//! later ranks and selects.
+
+use url::Url;
+
+use crate::denoise::{DenoiseConfig, DenoiseStats, is_noise};
+use crate::parse::dom::{Doc, Id, decode_entities};
+use crate::parse::{Unit, UnitKind};
+use crate::text;
+
+const INLINE_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "big", "cite", "code", "data", "del", "dfn", "em", "font", "i",
+    "img", "ins", "kbd", "mark", "q", "s", "samp", "small", "span", "strike", "strong", "sub",
+    "sup", "time", "tt", "u", "var", "wbr", "br", "ruby", "rt", "rp",
+];
+
+const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+
+/// Options that change what ends up in the Markdown.
+#[derive(Debug, Clone)]
+pub struct RenderOptions {
+    /// Keep `[text](href)` links instead of flattening to text.
+    pub include_links: bool,
+    /// Keep `![alt](src)` images.
+    pub include_images: bool,
+    /// Render `<table>` as a pipe table.
+    pub include_tables: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions { include_links: true, include_images: false, include_tables: true }
+    }
+}
+
+pub(crate) struct Writer<'d, 'a> {
+    doc: &'d Doc<'a>,
+    cfg: &'d DenoiseConfig,
+    opts: &'d RenderOptions,
+    base: Option<Url>,
+    heading_stack: Vec<(u8, String)>,
+    list_depth: usize,
+    pub(crate) units: Vec<Unit>,
+    pub(crate) stats: DenoiseStats,
+}
+
+impl<'d, 'a> Writer<'d, 'a> {
+    pub(crate) fn new(
+        doc: &'d Doc<'a>,
+        cfg: &'d DenoiseConfig,
+        opts: &'d RenderOptions,
+        base: Option<Url>,
+    ) -> Self {
+        Writer {
+            doc,
+            cfg,
+            opts,
+            base,
+            heading_stack: Vec::new(),
+            list_depth: 0,
+            units: Vec::new(),
+            stats: DenoiseStats::default(),
+        }
+    }
+
+    /// Walk a subtree, emitting units.
+    pub(crate) fn walk(&mut self, id: Id) {
+        self.stats.nodes_visited += 1;
+        if is_noise(self.doc, id, self.cfg) {
+            self.stats.nodes_dropped += self.doc.descendants(id).len();
+            return;
+        }
+        let name = self.doc.tag_name(id);
+
+        if let Some(level) = heading_level(&name) {
+            let inline = self.render_children_inline(id);
+            let t = text::normalize_ws(&inline);
+            if !t.is_empty() {
+                self.push_heading(level, &t);
+                let md = format!("{} {}", "#".repeat(level as usize), t);
+                self.emit(UnitKind::Heading, level, t, md);
+            }
+            return;
+        }
+
+        match name.as_str() {
+            "" => {
+                // Bare text directly under a container.
+                if let Some(tl::Node::Raw(_)) = self.doc.node(id) {
+                    let t = text::normalize_ws(&self.render_inline(id));
+                    if text::visible_len(&t) >= self.cfg.min_block_len as usize {
+                        self.emit(UnitKind::Paragraph, 0, t.clone(), t);
+                    }
+                }
+            }
+            "p" | "dd" | "dt" | "figcaption" | "summary" | "address" => {
+                let t = text::normalize_ws(&self.render_children_inline(id));
+                if !t.is_empty() {
+                    let plain = strip_markdown(&t);
+                    self.emit(UnitKind::Paragraph, 0, plain, t);
+                }
+            }
+            "pre" => self.emit_code(id),
+            "blockquote" => {
+                let inner = self.doc.inner_text(id);
+                if !inner.is_empty() {
+                    let md = inner.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
+                    self.emit(UnitKind::Quote, 0, inner, md);
+                }
+            }
+            "ul" | "ol" | "dl" => {
+                self.list_depth += 1;
+                self.walk_children(id);
+                self.list_depth = self.list_depth.saturating_sub(1);
+            }
+            "li" => self.emit_list_item(id),
+            "table" if self.opts.include_tables => self.emit_table(id),
+            "table" => {}
+            "hr" | "br" => {}
+            _ => self.walk_children(id),
+        }
+    }
+
+    fn walk_children(&mut self, id: Id) {
+        // Group runs of inline children into implicit paragraphs so that text
+        // sitting loose inside a `<div>` is not lost.
+        let mut run: Vec<Id> = Vec::new();
+        for child in self.doc.children(id) {
+            if self.is_inline(child) {
+                run.push(child);
+            } else {
+                self.flush_inline_run(&mut run);
+                self.walk(child);
+            }
+        }
+        self.flush_inline_run(&mut run);
+    }
+
+    fn flush_inline_run(&mut self, run: &mut Vec<Id>) {
+        if run.is_empty() {
+            return;
+        }
+        // An image is a block in its own right, so a run that carries one is
+        // kept whatever its alt text weighs; the length gate exists to drop
+        // stray words, not figures the caller explicitly asked for.
+        let has_image =
+            self.opts.include_images && run.iter().any(|&id| self.doc.tag_name(id) == "img");
+        let mut buf = String::new();
+        for id in run.drain(..) {
+            buf.push_str(&self.render_inline(id));
+        }
+        let t = text::normalize_ws(&buf);
+        let plain = strip_markdown(&t);
+        if has_image || text::visible_len(&plain) >= self.cfg.min_block_len as usize {
+            self.emit(UnitKind::Paragraph, 0, plain, t);
+        }
+    }
+
+    fn is_inline(&self, id: Id) -> bool {
+        match self.doc.node(id) {
+            Some(tl::Node::Raw(_)) => true,
+            Some(tl::Node::Tag(tag)) => {
+                INLINE_TAGS.contains(&tag.name().as_utf8_str().to_ascii_lowercase().as_str())
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_list_item(&mut self, id: Id) {
+        // Nested lists are walked separately so they keep their own indent.
+        let mut inline_run: Vec<Id> = Vec::new();
+        let mut nested: Vec<Id> = Vec::new();
+        for child in self.doc.children(id) {
+            if matches!(self.doc.tag_name(child).as_str(), "ul" | "ol" | "dl") {
+                nested.push(child);
+            } else {
+                inline_run.push(child);
+            }
+        }
+        let mut buf = String::new();
+        for child in inline_run {
+            if self.is_inline(child) {
+                buf.push_str(&self.render_inline(child));
+            } else if !is_noise(self.doc, child, self.cfg) {
+                buf.push_str(&self.doc.inner_text(child));
+                buf.push(' ');
+            }
+        }
+        let t = text::normalize_ws(&buf);
+        if !t.is_empty() {
+            let depth = self.list_depth.saturating_sub(1).min(6);
+            let md = format!("{}- {}", "  ".repeat(depth), t);
+            self.emit(UnitKind::ListItem, depth as u8, strip_markdown(&t), md);
+        }
+        for child in nested {
+            self.walk(child);
+        }
+    }
+
+    fn emit_code(&mut self, id: Id) {
+        let lang = self
+            .doc
+            .descendants(id)
+            .into_iter()
+            .find_map(|d| self.doc.attr(d, "class"))
+            .and_then(|c| {
+                c.split_whitespace()
+                    .find_map(|c| c.strip_prefix("language-").or_else(|| c.strip_prefix("lang-")))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let raw = self.doc.raw_text(id);
+        let body = raw.trim_end_matches('\n');
+        if body.trim().is_empty() {
+            return;
+        }
+        let md = format!("```{lang}\n{body}\n```");
+        self.emit(UnitKind::Code, 0, body.to_string(), md);
+    }
+
+    fn emit_table(&mut self, id: Id) {
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut header: Option<Vec<String>> = None;
+        for d in self.doc.descendants(id) {
+            if self.doc.tag_name(d) != "tr" {
+                continue;
+            }
+            let mut cells = Vec::new();
+            let mut is_header = false;
+            for c in self.doc.children(d) {
+                let name = self.doc.tag_name(c);
+                if name == "th" {
+                    is_header = true;
+                } else if name != "td" {
+                    continue;
+                }
+                cells.push(text::normalize_ws(&self.render_children_inline(c)).replace('|', "\\|"));
+            }
+            if cells.is_empty() {
+                continue;
+            }
+            if is_header && header.is_none() {
+                header = Some(cells);
+            } else {
+                rows.push(cells);
+            }
+        }
+        if rows.is_empty() && header.is_none() {
+            return;
+        }
+        let width = header
+            .as_ref()
+            .map(Vec::len)
+            .into_iter()
+            .chain(rows.iter().map(Vec::len))
+            .max()
+            .unwrap_or(0);
+        if width == 0 {
+            return;
+        }
+        let pad = |mut r: Vec<String>| {
+            r.resize(width, String::new());
+            format!("| {} |", r.join(" | "))
+        };
+        let mut md = String::new();
+        let head = header.unwrap_or_else(|| vec![String::new(); width]);
+        md.push_str(&pad(head));
+        md.push('\n');
+        md.push_str(&format!("|{}", " --- |".repeat(width)));
+        for r in &rows {
+            md.push('\n');
+            md.push_str(&pad(r.clone()));
+        }
+        let plain = self.doc.inner_text(id);
+        self.emit(UnitKind::Table, 0, plain, md);
+    }
+
+    fn render_children_inline(&self, id: Id) -> String {
+        let mut buf = String::new();
+        for child in self.doc.children(id) {
+            buf.push_str(&self.render_inline(child));
+        }
+        buf
+    }
+
+    /// Render a subtree as inline Markdown.
+    fn render_inline(&self, id: Id) -> String {
+        match self.doc.node(id) {
+            Some(tl::Node::Raw(bytes)) => {
+                let raw = bytes.as_utf8_str();
+                escape_inline(&decode_entities(&raw))
+            }
+            Some(tl::Node::Comment(_)) | None => String::new(),
+            Some(tl::Node::Tag(tag)) => {
+                let name = tag.name().as_utf8_str().to_ascii_lowercase();
+                if crate::denoise::DROP_TAGS.contains(&name.as_str()) {
+                    return String::new();
+                }
+                match name.as_str() {
+                    "br" => "\n".to_string(),
+                    "img" => {
+                        if !self.opts.include_images {
+                            return String::new();
+                        }
+                        let alt = self.doc.attr(id, "alt").unwrap_or_default();
+                        match self.resolve(id, "src").or_else(|| self.resolve(id, "data-src")) {
+                            Some(src) => format!("![{}]({})", escape_inline(&alt), src),
+                            None => String::new(),
+                        }
+                    }
+                    "a" => {
+                        let inner = self.render_children_inline(id);
+                        if !self.opts.include_links || inner.trim().is_empty() {
+                            return inner;
+                        }
+                        match self.resolve(id, "href") {
+                            Some(href) if !href.starts_with("javascript:") => {
+                                format!("[{}]({})", inner.trim(), href)
+                            }
+                            _ => inner,
+                        }
+                    }
+                    "strong" | "b" => wrap(&self.render_children_inline(id), "**"),
+                    "em" | "i" | "dfn" | "cite" | "var" => {
+                        wrap(&self.render_children_inline(id), "*")
+                    }
+                    "del" | "s" | "strike" => wrap(&self.render_children_inline(id), "~~"),
+                    "code" | "kbd" | "samp" | "tt" => {
+                        let inner = text::normalize_ws(&self.doc.inner_text(id));
+                        if inner.is_empty() { inner } else { format!("`{inner}`") }
+                    }
+                    "sup" => {
+                        // Footnote markers are pure noise in an LLM context.
+                        let inner = self.doc.inner_text(id);
+                        if inner.chars().all(|c| c.is_ascii_digit() || "[]".contains(c)) {
+                            String::new()
+                        } else {
+                            self.render_children_inline(id)
+                        }
+                    }
+                    _ => self.render_children_inline(id),
+                }
+            }
+        }
+    }
+
+    /// Absolutise an attribute against the document's base URL.
+    fn resolve(&self, id: Id, key: &str) -> Option<String> {
+        let raw = self.doc.attr(id, key)?;
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        match &self.base {
+            Some(base) => base.join(raw).ok().map(|u| u.to_string()),
+            None => Some(raw.to_string()),
+        }
+    }
+
+    fn push_heading(&mut self, level: u8, title: &str) {
+        while self.heading_stack.last().is_some_and(|(l, _)| *l >= level) {
+            self.heading_stack.pop();
+        }
+        self.heading_stack.push((level, title.to_string()));
+    }
+
+    fn emit(&mut self, kind: UnitKind, level: u8, plain: String, markdown: String) {
+        let plain = plain.trim().to_string();
+        let markdown = markdown.trim().to_string();
+        if markdown.is_empty() {
+            return;
+        }
+        let path: Vec<String> = if kind == UnitKind::Heading {
+            self.heading_stack.iter().rev().skip(1).rev().map(|(_, t)| t.clone()).collect()
+        } else {
+            self.heading_stack.iter().map(|(_, t)| t.clone()).collect()
+        };
+        self.stats.markdown_bytes += markdown.len() + 2;
+        self.units.push(Unit {
+            kind,
+            level,
+            tokens: text::estimate_tokens(&markdown),
+            position: self.units.len(),
+            text: plain,
+            markdown,
+            heading_path: path,
+        });
+    }
+}
+
+fn heading_level(name: &str) -> Option<u8> {
+    HEADINGS.iter().position(|h| *h == name).map(|i| i as u8 + 1)
+}
+
+fn wrap(inner: &str, marker: &str) -> String {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Preserve the surrounding spacing the original markup implied.
+    let lead = if inner.starts_with(char::is_whitespace) { " " } else { "" };
+    let trail = if inner.ends_with(char::is_whitespace) { " " } else { "" };
+    format!("{lead}{marker}{trimmed}{marker}{trail}")
+}
+
+/// Escape only what would otherwise change Markdown block structure.
+///
+/// Aggressive escaping makes the text harder for a small model to read, so we
+/// leave `*` and `_` alone inside words and only defuse link syntax.
+fn escape_inline(s: &str) -> String {
+    if !s.contains(['[', ']']) {
+        return s.to_string();
+    }
+    s.replace('[', "\\[").replace(']', "\\]")
+}
+
+/// Strip the Markdown we just added, to recover plain text for ranking.
+pub(crate) fn strip_markdown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_link_text = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            '[' => in_link_text = true,
+            ']' => {
+                in_link_text = false;
+                // Drop the following `(...)` target.
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut depth = 1;
+                    for c in chars.by_ref() {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            '*' | '`' | '~' | '#' | '>' if !in_link_text => {}
+            _ => out.push(c),
+        }
+    }
+    text::normalize_ws(&out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_links_and_emphasis() {
+        assert_eq!(strip_markdown("**bold** and [a link](http://x.dev/y)"), "bold and a link");
+        assert_eq!(strip_markdown("`code` ~~gone~~"), "code gone");
+    }
+
+    #[test]
+    fn wrap_keeps_outer_spacing() {
+        assert_eq!(wrap(" hi ", "**"), " **hi** ");
+        assert_eq!(wrap("   ", "**"), "");
+    }
+
+    #[test]
+    fn escape_only_touches_brackets() {
+        assert_eq!(escape_inline("a_b*c"), "a_b*c");
+        assert_eq!(escape_inline("see [1]"), "see \\[1\\]");
+    }
+}

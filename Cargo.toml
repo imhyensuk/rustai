@@ -1,0 +1,78 @@
+[package]
+name         = "rustai-core"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.98"
+description  = "Zero-cost local research pipeline: async search routing, TLS-fingerprint-aware fetching, SIMD DOM denoising and BM25 context slimming for local LLMs."
+authors      = ["rustai contributors"]
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/hyeonseok-im/rustai"
+homepage     = "https://github.com/hyeonseok-im/rustai"
+documentation = "https://docs.rs/rustai"
+readme       = "README.md"
+keywords     = ["rag", "scraping", "llm", "html", "bm25"]
+categories   = ["web-programming::http-client", "text-processing", "api-bindings"]
+exclude      = ["/.github", "/benches", "/.venv"]
+
+[lib]
+# Matches the package name: `cargo add rustai-core` then `use rustai_core::…`.
+# The crates.io name `rustai` was already taken; the PyPI package is still `rustai`.
+name       = "rustai_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["impersonate"]
+
+# Opt-in SIMD tokenisation inside `tl`. Requires a *nightly* toolchain: the
+# feature is gated on `#![feature(portable_simd)]` upstream. Text scanning in
+# this crate is SIMD-accelerated on stable regardless, via `memchr`.
+nightly-simd = ["tl/simd"]
+
+# Chrome TLS/JA3 + HTTP/2 fingerprint emulation.
+impersonate = ["dep:wreq-util"]
+
+# Conditional headless-Chrome fallback for JS-gated pages.
+browser = ["dep:chromiumoxide"]
+
+# PyO3 bindings. Enabled by maturin; off for plain `cargo build`.
+python = ["dep:pyo3"]
+extension-module = ["python", "pyo3/extension-module"]
+
+[dependencies]
+tokio      = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync"] }
+rayon      = "1.12"
+wreq       = { version = "0.16", default-features = false, features = ["tokio-rt", "webpki-roots", "gzip", "brotli", "deflate", "zstd", "json", "query", "charset", "cookies", "stream"] }
+wreq-util  = { version = "0.2", optional = true, default-features = false, features = ["emulation", "emulation-serde"] }
+tl         = { version = "0.7", default-features = false }
+pyo3       = { version = "0.29", optional = true, features = ["abi3-py39"] }
+chromiumoxide  = { version = "0.9", optional = true }
+futures-util   = { version = "0.3", default-features = false, features = ["std"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml  = "0.42"
+url        = "2.5"
+regex      = "1.13"
+thiserror  = "2"
+html-escape = "0.2"
+percent-encoding = "2.3"
+unicode-segmentation = "1.13"
+memchr     = "2.7"
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["full"] }
+libc  = "0.2"
+
+[[example]]
+name = "bench"
+required-features = []
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+strip         = true
+
+[package.metadata.docs.rs]
+all-features = false
+features     = ["impersonate"]
