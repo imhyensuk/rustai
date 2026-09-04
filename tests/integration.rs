@@ -4,7 +4,9 @@
 //! matters here is that parse → denoise → rank compose correctly on documents
 //! that look like the real thing.
 
-use rustai_core::parse::{ExtractOptions, extract, extract_many};
+use rustai_core::parse::{
+    ArticleKind, ExtractOptions, IndexMode, extract, extract_many, extract_with,
+};
 use rustai_core::rank::{SlimConfig, slim};
 
 const NEWS: &str = r##"<!doctype html><html lang="en"><head>
@@ -118,10 +120,79 @@ fn parallel_extraction_matches_serial() {
     }
 }
 
+const LISTING: &str = r##"<html><body>
+<header><nav><a href="/">Home</a><a href="/about">About us</a></nav></header>
+<main>
+  <h2>Technology</h2>
+  <div class="card"><h3><a href="/story/rust">Rust cuts crawler memory by an order of magnitude</a></h3>
+    <p>A new pipeline holds under five megabytes while parsing hundreds of documents a second.</p></div>
+  <div class="card"><h3><a href="/story/http3">What actually changed in HTTP/3</a></h3>
+    <p>The transport moved to UDP, and head-of-line blocking went with it.</p></div>
+  <div class="card"><h3><a href="/story/bm25">BM25 is still the baseline to beat</a></h3>
+    <p>Twenty years on, the ranking function remains hard to improve upon.</p></div>
+  <h2>Opinion</h2>
+  <div class="card"><h3><a href="/opinion/agents">Agents are not a product category</a></h3>
+    <p>A short argument about naming things properly.</p></div>
+  <div class="card"><h3><a href="/opinion/slm">The case for small local models</a></h3>
+    <p>Latency, privacy and cost all point in the same direction.</p></div>
+  <a href="/page/2">Next</a>
+</main>
+<footer><a href="/privacy">Privacy policy</a></footer>
+</body></html>"##;
+
+#[test]
+fn a_listing_page_extracts_as_an_inventory() {
+    let art = extract(LISTING, Some("https://wire.example/")).unwrap();
+
+    assert_eq!(art.kind, ArticleKind::Index, "listing was not recognised:\n{}", art.markdown);
+    assert_eq!(art.links.len(), 5, "{:#?}", art.links);
+
+    // Stories, with absolute URLs and their standfirsts.
+    let bm25 = art.links.iter().find(|l| l.url.ends_with("/story/bm25")).expect("bm25 story");
+    assert_eq!(bm25.heading_path, ["Technology"]);
+    assert!(bm25.snippet.contains("ranking function"), "{:?}", bm25.snippet);
+
+    // Navigation, pagination and the footer are not inventory.
+    for junk in ["/about", "/page/2", "/privacy"] {
+        assert!(!art.links.iter().any(|l| l.url.contains(junk)), "{junk} was harvested");
+    }
+
+    // And the Markdown is rankable, not a wall of anchors.
+    assert!(art.markdown.contains("## Technology"));
+    assert!(
+        art.markdown
+            .contains("- [BM25 is still the baseline to beat](https://wire.example/story/bm25)")
+    );
+}
+
+#[test]
+fn an_article_is_never_mistaken_for_a_listing() {
+    for html in [NEWS, BLOG] {
+        let art = extract(html, Some("https://example.com/post")).unwrap();
+        assert_eq!(art.kind, ArticleKind::Article, "article was read as a listing");
+        assert!(art.links.is_empty(), "links were harvested from an article");
+    }
+}
+
+#[test]
+fn index_mode_can_be_forced_or_disabled() {
+    let never = ExtractOptions { index_mode: IndexMode::Never, ..ExtractOptions::new() };
+    let art = extract_with(LISTING, Some("https://wire.example/"), &never).unwrap();
+    assert_eq!(art.kind, ArticleKind::Article);
+    assert!(art.links.is_empty());
+
+    // Forcing harvests links from a real article without reclassifying it.
+    let always = ExtractOptions { index_mode: IndexMode::Always, ..ExtractOptions::new() };
+    let art = extract_with(NEWS, Some("https://wire.example/story"), &always).unwrap();
+    assert_eq!(art.kind, ArticleKind::Article);
+    assert!(art.markdown.contains("Memory ceilings"), "the article body was lost");
+}
+
 #[test]
 fn malformed_documents_never_panic() {
     let inputs = [
         "",
+        "<ul><li><a href=\"/a\">A link that is long enough to harvest</a></li></ul>",
         "<html>",
         "<div><p>unclosed",
         "<article><p>&amp;&lt;&#x41;&nosuchentity;</p></article>",

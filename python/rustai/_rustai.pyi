@@ -5,6 +5,7 @@ from typing import Any, Literal, Sequence
 __version__: str
 
 UnitKind = Literal["heading", "paragraph", "list_item", "code", "quote", "table"]
+IndexMode = Literal["auto", "never", "always"]
 
 class RustaiError(Exception):
     """Base class for every rustai error."""
@@ -74,9 +75,24 @@ class DenoiseStats:
     def compression(self) -> float: ...
     def to_dict(self) -> dict[str, Any]: ...
 
+class Link:
+    @property
+    def text(self) -> str: ...
+    @property
+    def url(self) -> str: ...
+    @property
+    def snippet(self) -> str: ...
+    @property
+    def heading_path(self) -> list[str]: ...
+    def to_dict(self) -> dict[str, Any]: ...
+
 class Article:
     @property
     def url(self) -> str | None: ...
+    @property
+    def kind(self) -> Literal["article", "index"]: ...
+    @property
+    def links(self) -> list[Link]: ...
     @property
     def title(self) -> str | None: ...
     @property
@@ -179,6 +195,7 @@ class Client:
         include_links: bool = True,
         include_images: bool = False,
         include_tables: bool = True,
+        index_mode: IndexMode = "auto",
         limit: int = 10,
     ) -> None: ...
     def search(self, query: str, *, strict: bool = False) -> list[SearchResult]: ...
@@ -197,6 +214,7 @@ def extract(
     include_links: bool = True,
     include_images: bool = False,
     include_tables: bool = True,
+    index_mode: IndexMode = "auto",
 ) -> Article: ...
 def extract_many(
     documents: Sequence[str],
@@ -205,6 +223,7 @@ def extract_many(
     include_links: bool = True,
     include_images: bool = False,
     include_tables: bool = True,
+    index_mode: IndexMode = "auto",
 ) -> list[Article]: ...
 def slim(
     query: str,

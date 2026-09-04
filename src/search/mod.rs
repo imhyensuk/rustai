@@ -70,6 +70,9 @@ pub enum Provider {
     Rss(String),
     /// A `sitemap.xml` or sitemap index, by URL.
     Sitemap(String),
+    /// An HTML listing page — a front page, archive or feed rendered for
+    /// people — harvested for the links it offers.
+    Index(String),
 }
 
 impl Provider {
@@ -84,6 +87,7 @@ impl Provider {
             Provider::SearxNG(_) => "searxng",
             Provider::Rss(_) => "rss",
             Provider::Sitemap(_) => "sitemap",
+            Provider::Index(_) => "index",
         }
     }
 
@@ -115,6 +119,7 @@ impl Provider {
             }
             "rss" | "feed" | "atom" => Provider::Rss(require_url(arg, "rss")?),
             "sitemap" => Provider::Sitemap(require_url(arg, "sitemap")?),
+            "index" | "page" | "listing" => Provider::Index(require_url(arg, "index")?),
             other => {
                 return Err(crate::Error::Config(format!("unknown provider `{other}`")));
             }
@@ -227,6 +232,7 @@ impl Router {
                     Provider::Sitemap(url) => {
                         feeds::search_sitemap(&fetcher, url, &query, limit).await
                     }
+                    Provider::Index(url) => feeds::search_index(&fetcher, url, &query, limit).await,
                 };
                 (provider, out)
             }
@@ -386,7 +392,12 @@ mod tests {
             Provider::parse("searxng:https://searx.be").unwrap(),
             Provider::SearxNG("https://searx.be".into())
         );
+        assert_eq!(
+            Provider::parse("index:https://news.example/").unwrap(),
+            Provider::Index("https://news.example/".into())
+        );
         assert!(Provider::parse("searxng").is_err());
+        assert!(Provider::parse("index").is_err());
         assert!(Provider::parse("tavily").is_err());
     }
 

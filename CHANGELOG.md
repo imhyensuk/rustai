@@ -12,6 +12,18 @@ All notable changes to this project are documented here. The format follows
   free. OpenAlex abstracts are stored as an inverted index and are reconstructed
   into readable text; arXiv results point at abstract pages rather than PDFs.
   `contact_email` opts into the OpenAlex/Crossref polite pool.
+- **Index-page extraction.** A front page, archive or aggregator defeats
+  article extraction for the same reason navigation is boilerplate everywhere
+  else — except there the link density is the point. Such pages now return an
+  inventory instead: titles, URLs, standfirsts and section headings, on
+  `Article.links`, with `Article.kind` saying which you got. Detection measures
+  how much of the page's prose belongs to a link rather than whether article
+  extraction failed, so a listing whose cards carry summaries is still
+  recognised. 12 of 12 correct across real news front pages, aggregators,
+  encyclopaedia articles, papers, READMEs and specs; ~1% of extraction time,
+  and `index_mode="never"` disables it.
+- `index:<url>` as a search provider: a site with no feed and no sitemap is
+  still collectable.
 - `extract_many` in the Python API: batch denoising across the rayon pool with
   the GIL released. ~4x a loop over `extract`, ~30x `trafilatura`.
 
@@ -32,6 +44,10 @@ All notable changes to this project are documented here. The format follows
   denoising signals, read `tl`'s per-tag source slice — which collapses to the
   opening tag alone when the parser cannot match a close, reporting 28 bytes for
   an element holding 180 KB. Markup weight is now accumulated directly.
+- `Unit.text` disagreed with `Unit.markdown` for tables — it carried the source
+  subtree's text rather than what was written — so a mis-nested table reported
+  3,870 characters of content behind 53 tokens of output, and every measurement
+  downstream inherited the error.
 - The boilerplate vocabulary missed plurals: `reference` did not match
   `references`, so Wikipedia citation lists survived and ate context budgets.
   High-precision terms are now conclusive at any size, since a reference list or

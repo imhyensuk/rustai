@@ -18,7 +18,9 @@ use pyo3::types::{PyDict, PyList};
 use crate::denoise::{DenoiseConfig, DenoiseStats};
 use crate::error::Error;
 use crate::http::{FetchConfig, Impersonate, Page};
-use crate::parse::{Article, ExtractOptions, Meta, RenderOptions, Unit};
+use crate::parse::{
+    Article, ArticleKind, ExtractOptions, IndexMode, Link, Meta, RenderOptions, Unit,
+};
 use crate::pipeline::{Pipeline, Research};
 use crate::rank::{Context, SlimConfig};
 use crate::search::{Provider, SearchConfig, SearchResult};
@@ -259,6 +261,44 @@ impl PyStats {
     }
 }
 
+/// One link harvested from a listing page.
+#[pyclass(name = "Link", frozen, module = "rustai", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyLink {
+    inner: Link,
+}
+
+#[pymethods]
+impl PyLink {
+    /// Anchor text.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+    /// Absolute URL.
+    #[getter]
+    fn url(&self) -> &str {
+        &self.inner.url
+    }
+    /// Nearby descriptive text, if the page offered any.
+    #[getter]
+    fn snippet(&self) -> &str {
+        &self.inner.snippet
+    }
+    /// Enclosing section headings, outermost first.
+    #[getter]
+    fn heading_path(&self) -> Vec<String> {
+        self.inner.heading_path.clone()
+    }
+    /// Everything above, as a dict.
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_dict(py, &self.inner)
+    }
+    fn __repr__(&self) -> String {
+        format!("Link(text={:?}, url={:?})", self.inner.text, self.inner.url)
+    }
+}
+
 /// A cleaned document.
 #[pyclass(name = "Article", frozen, module = "rustai", from_py_object)]
 #[derive(Clone)]
@@ -287,6 +327,19 @@ impl PyArticle {
     #[getter]
     fn text(&self) -> &str {
         &self.inner.text
+    }
+    /// `"article"` for prose, `"index"` for a listing page.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner.kind {
+            ArticleKind::Article => "article",
+            ArticleKind::Index => "index",
+        }
+    }
+    /// Links harvested from a listing page.
+    #[getter]
+    fn links(&self) -> Vec<PyLink> {
+        self.inner.links.iter().cloned().map(|inner| PyLink { inner }).collect()
     }
     /// Metadata from `<head>`.
     #[getter]
@@ -317,7 +370,8 @@ impl PyArticle {
     }
     fn __repr__(&self) -> String {
         format!(
-            "Article(title={:?}, units={}, tokens={})",
+            "Article(kind={}, title={:?}, units={}, tokens={})",
+            self.kind(),
             self.inner.title(),
             self.inner.units.len(),
             self.inner.tokens()
@@ -588,6 +642,7 @@ impl PyClient {
         include_links = true,
         include_images = false,
         include_tables = true,
+        index_mode = "auto",
         limit = 10,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -608,6 +663,7 @@ impl PyClient {
         include_links: bool,
         include_images: bool,
         include_tables: bool,
+        index_mode: &str,
         limit: usize,
     ) -> PyResult<Self> {
         if !timeout.is_finite() || timeout <= 0.0 {
@@ -651,6 +707,7 @@ impl PyClient {
             .extract(ExtractOptions {
                 render: RenderOptions { include_links, include_images, include_tables },
                 denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
+                index_mode: parse_index_mode(index_mode)?,
                 ..ExtractOptions::new()
             })
             .slim(SlimConfig { max_tokens, diversity, ..Default::default() })
@@ -736,9 +793,20 @@ fn collect<T>(results: Vec<crate::error::Result<T>>, raise: bool) -> PyResult<Ve
 
 // ----------------------------------------------------------- free functions
 
+fn parse_index_mode(mode: &str) -> PyResult<IndexMode> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(IndexMode::Auto),
+        "never" | "off" => Ok(IndexMode::Never),
+        "always" | "on" => Ok(IndexMode::Always),
+        other => Err(PyValueError::new_err(format!(
+            "index_mode must be `auto`, `never` or `always`, not {other:?}"
+        ))),
+    }
+}
+
 /// Denoise a raw HTML string into Markdown. No network access.
 #[pyfunction]
-#[pyo3(signature = (html, url = None, *, include_links = true, include_images = false, include_tables = true))]
+#[pyo3(signature = (html, url = None, *, include_links = true, include_images = false, include_tables = true, index_mode = "auto"))]
 fn extract(
     py: Python<'_>,
     html: &str,
@@ -746,10 +814,12 @@ fn extract(
     include_links: bool,
     include_images: bool,
     include_tables: bool,
+    index_mode: &str,
 ) -> PyResult<PyArticle> {
     let opts = ExtractOptions {
         render: RenderOptions { include_links, include_images, include_tables },
         denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
+        index_mode: parse_index_mode(index_mode)?,
         ..ExtractOptions::new()
     };
     // Extraction on a large document is long enough to be worth releasing the
@@ -769,7 +839,7 @@ fn extract(
 /// Output is 1:1 with the input, so a failed document raises rather than
 /// silently shifting every later index.
 #[pyfunction]
-#[pyo3(signature = (documents, urls = None, *, include_links = true, include_images = false, include_tables = true))]
+#[pyo3(signature = (documents, urls = None, *, include_links = true, include_images = false, include_tables = true, index_mode = "auto"))]
 fn extract_many(
     py: Python<'_>,
     documents: Vec<String>,
@@ -777,6 +847,7 @@ fn extract_many(
     include_links: bool,
     include_images: bool,
     include_tables: bool,
+    index_mode: &str,
 ) -> PyResult<Vec<PyArticle>> {
     if let Some(urls) = &urls
         && urls.len() != documents.len()
@@ -790,6 +861,7 @@ fn extract_many(
     let opts = ExtractOptions {
         render: RenderOptions { include_links, include_images, include_tables },
         denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
+        index_mode: parse_index_mode(index_mode)?,
         ..ExtractOptions::new()
     };
 
@@ -866,6 +938,7 @@ fn research(
         true,
         false,
         true,
+        "auto",
         10,
     )?;
     client.research(py, query, max_sources)
@@ -917,6 +990,7 @@ pub fn rustai_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyArticle>()?;
     m.add_class::<PyPage>()?;
     m.add_class::<PyUnit>()?;
+    m.add_class::<PyLink>()?;
     m.add_class::<PyMeta>()?;
     m.add_class::<PyStats>()?;
     m.add_class::<PySearchResult>()?;

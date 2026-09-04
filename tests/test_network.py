@@ -144,6 +144,45 @@ class TestHtmlRedirects:
         assert "1.76" in (article.title or "")
 
 
+class TestIndexPages:
+    """Front pages: the link list is the content, and a collectable source."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://news.ycombinator.com/",
+            "https://blog.rust-lang.org/",
+        ],
+    )
+    def test_listing_pages_yield_an_inventory(self, client, url):
+        page = client.fetch([url], raise_on_error=True)[0]
+        article = page.extract()
+        assert article.kind == "index", f"{url} was read as an article"
+        assert len(article.links) >= 10
+        assert all(l.url.startswith("http") for l in article.links)
+        assert all(l.text for l in article.links)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://en.wikipedia.org/wiki/BM25",
+            "https://arxiv.org/abs/1706.03762",
+            "https://doc.rust-lang.org/book/ch01-01-installation.html",
+        ],
+    )
+    def test_article_pages_are_not_reclassified(self, client, url):
+        article = client.fetch([url], raise_on_error=True)[0].extract()
+        assert article.kind == "article", f"{url} was read as a listing"
+
+    def test_a_listing_page_works_as_a_provider(self):
+        """A site with no feed and no sitemap is still collectable."""
+        c = rustai.Client(providers=["index:https://news.ycombinator.com/"], timeout=30.0)
+        hits = c.search("programming language", strict=True)
+        assert hits
+        assert all(h.url.startswith("http") for h in hits)
+        assert all("index" in h.providers for h in hits)
+
+
 class TestResearch:
     def test_end_to_end(self, client):
         result = client.research("what is the BM25 ranking function", max_sources=3)

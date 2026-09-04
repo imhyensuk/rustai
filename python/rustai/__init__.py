@@ -20,6 +20,15 @@ The three things you will use most::
     article = rustai.extract(html, url="https://example.com/post")
     articles = rustai.extract_many(list_of_html)   # parallel across every core
 
+Listing pages -- front pages, archives, feeds rendered for people -- are
+collected as link inventories rather than prose, and work as a source::
+
+    front = rustai.extract(html, url)      # .kind == "index"
+    for link in front.links:
+        print(link.text, link.url)
+
+    client = rustai.Client(providers=["index:https://news.ycombinator.com/"])
+
 Scholarly sources are first-class alongside web search::
 
     client = rustai.Client(
@@ -38,6 +47,7 @@ from ._rustai import (
     DenoiseStats,
     ExtractError,
     HttpStatusError,
+    Link,
     Meta,
     NetworkError,
     Page,
@@ -68,6 +78,7 @@ __all__ = [
     "DenoiseStats",
     "ExtractError",
     "HttpStatusError",
+    "Link",
     "Meta",
     "NetworkError",
     "Page",

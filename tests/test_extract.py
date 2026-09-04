@@ -143,6 +143,77 @@ class TestExtractMany:
         assert rustai.extract_many([]) == []
 
 
+LISTING = """<html><body>
+<header><nav><a href="/">Home</a><a href="/about">About us here</a></nav></header>
+<main>
+  <h2>Technology</h2>
+  <div class="card"><h3><a href="/story/rust">Rust cuts crawler memory by an order of magnitude</a></h3>
+    <p>A new pipeline holds under five megabytes while parsing hundreds of documents.</p></div>
+  <div class="card"><h3><a href="/story/http3">What actually changed in HTTP/3</a></h3>
+    <p>The transport moved to UDP, and head-of-line blocking went with it.</p></div>
+  <div class="card"><h3><a href="/story/bm25">BM25 is still the baseline to beat</a></h3>
+    <p>Twenty years on, the ranking function remains hard to improve upon.</p></div>
+  <h2>Opinion</h2>
+  <div class="card"><h3><a href="/opinion/agents">Agents are not a product category</a></h3>
+    <p>A short argument about naming things properly.</p></div>
+  <div class="card"><h3><a href="/opinion/slm">The case for small local models</a></h3>
+    <p>Latency, privacy and cost all point the same way.</p></div>
+  <a href="/page/2">Next page</a>
+</main>
+<footer><a href="/privacy">Privacy policy</a></footer>
+</body></html>"""
+
+
+@pytest.fixture(scope="module")
+def listing():
+    return rustai.extract(LISTING, "https://wire.example/")
+
+
+class TestIndexPages:
+    def test_classified_as_an_index(self, listing):
+        assert listing.kind == "index"
+        assert len(listing.links) == 5, [l.url for l in listing.links]
+
+    def test_links_carry_url_snippet_and_section(self, listing):
+        bm25 = next(l for l in listing.links if l.url.endswith("/story/bm25"))
+        assert bm25.text == "BM25 is still the baseline to beat"
+        assert bm25.url == "https://wire.example/story/bm25"
+        assert "ranking function" in bm25.snippet
+        assert bm25.heading_path == ["Technology"]
+
+    @pytest.mark.parametrize("junk", ["/about", "/page/2", "/privacy"])
+    def test_controls_are_not_inventory(self, listing, junk):
+        assert not any(junk in l.url for l in listing.links)
+
+    def test_markdown_is_rankable(self, listing):
+        assert "## Technology" in listing.markdown
+        assert "- [BM25 is still the baseline to beat](https://wire.example/story/bm25)" in listing.markdown
+        ctx = rustai.slim("ranking functions", [listing], max_tokens=120)
+        assert "BM25" in ctx.markdown
+
+    def test_articles_are_not_reclassified(self, article):
+        assert article.kind == "article"
+        assert article.links == []
+
+    def test_mode_never_disables_it(self):
+        art = rustai.extract(LISTING, "https://wire.example/", index_mode="never")
+        assert art.kind == "article"
+        assert art.links == []
+
+    def test_mode_always_harvests_from_an_article(self):
+        art = rustai.extract(ARTICLE, "https://example.com/post", index_mode="always")
+        assert art.kind == "article", "forcing must not reclassify"
+        assert "Zero-cost crawling" in art.markdown
+
+    def test_invalid_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="index_mode"):
+            rustai.extract(LISTING, index_mode="sometimes")
+
+    def test_link_to_dict(self, listing):
+        d = listing.links[0].to_dict()
+        assert set(d) == {"text", "url", "snippet", "heading_path"}
+
+
 class TestEdgeCases:
     @pytest.mark.parametrize("html", ["", "   ", "<html></html>", "not html at all"])
     def test_degenerate_input_does_not_raise(self, html):

@@ -206,6 +206,34 @@ pub(crate) async fn search_rss(
     Ok(rank_hits(hits, query, limit))
 }
 
+/// Fetch an HTML listing page and return its links, ranked against the query.
+///
+/// A front page is a feed without the XML: the same inventory, marked up for
+/// people instead of machines. Treating it as a provider means a site with no
+/// feed and no sitemap is still collectable.
+pub(crate) async fn search_index(
+    fetcher: &Fetcher,
+    page_url: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<RawHit>> {
+    let page = fetcher.fetch_api(page_url).await?;
+    let opts = crate::parse::ExtractOptions {
+        index_mode: crate::parse::IndexMode::Always,
+        ..crate::parse::ExtractOptions::new()
+    };
+    let article = crate::parse::extract_with(&page.body, Some(&page.final_url), &opts)?;
+    if article.links.is_empty() {
+        return Err(Error::provider("index", format!("{page_url} listed no links")));
+    }
+    let hits: Vec<RawHit> = article
+        .links
+        .into_iter()
+        .map(|l| RawHit { title: l.text, url: l.url, snippet: l.snippet })
+        .collect();
+    Ok(rank_hits(hits, query, limit))
+}
+
 /// Fetch a sitemap and return the URLs whose slugs best match the query.
 pub(crate) async fn search_sitemap(
     fetcher: &Fetcher,

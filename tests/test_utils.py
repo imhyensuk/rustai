@@ -106,12 +106,12 @@ class TestClientConstruction:
         "provider",
         ["duckduckgo", "ddg", "wikipedia", "wikipedia:ko", "searxng:https://searx.be",
          "rss:https://a.dev/f.xml", "sitemap:https://a.dev/s.xml",
-         "arxiv", "openalex", "crossref", "OpenAlex"],
+         "arxiv", "openalex", "crossref", "OpenAlex", "index:https://news.example/"],
     )
     def test_provider_specs_accepted(self, provider):
         rustai.Client(providers=[provider])
 
-    @pytest.mark.parametrize("provider", ["tavily", "searxng", "rss", "", "firecrawl"])
+    @pytest.mark.parametrize("provider", ["tavily", "searxng", "rss", "", "firecrawl", "index"])
     def test_bad_provider_specs_rejected(self, provider):
         with pytest.raises(ValueError):
             rustai.Client(providers=[provider])

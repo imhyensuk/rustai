@@ -7,6 +7,7 @@
 //! via [`extract_many`].
 
 pub(crate) mod dom;
+mod index;
 mod markdown;
 mod meta;
 
@@ -22,11 +23,35 @@ const MIN_BODY_FOR_RATIO_CHECK: usize = 2_000;
 /// Extracting less than this share of the document's visible text means the
 /// content root is almost certainly wrong.
 const STARVED_PERCENT: usize = 5;
+
 use crate::error::Result;
 use crate::text;
 
+pub use index::Link;
 pub use markdown::RenderOptions;
 pub use meta::Meta;
+
+/// Whether a page turned out to be an article or a listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArticleKind {
+    /// Prose: the usual case.
+    Article,
+    /// A front page, feed or archive, where the link list is the content.
+    Index,
+}
+
+/// When to fall back to index-page extraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexMode {
+    /// Try it only when article extraction came up empty. The default.
+    #[default]
+    Auto,
+    /// Never; a page with no prose extracts to nothing.
+    Never,
+    /// Always harvest links, even from a page that did yield an article.
+    Always,
+}
 
 /// What kind of block a [`Unit`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
@@ -91,6 +116,8 @@ pub struct Unit {
 pub struct Article {
     /// Source URL, if one was supplied.
     pub url: Option<String>,
+    /// Whether this page read as prose or as a listing.
+    pub kind: ArticleKind,
     /// Metadata read from `<head>`.
     pub meta: Meta,
     /// The full cleaned document as Markdown.
@@ -99,6 +126,9 @@ pub struct Article {
     pub text: String,
     /// The Markdown split into rankable blocks.
     pub units: Vec<Unit>,
+    /// Links harvested from a listing page. Empty for ordinary articles unless
+    /// [`IndexMode::Always`] was requested.
+    pub links: Vec<Link>,
     /// What the denoiser dropped.
     pub stats: DenoiseStats,
 }
@@ -126,6 +156,8 @@ impl Article {
 pub struct ExtractOptions {
     /// Denoiser tuning.
     pub denoise: DenoiseConfig,
+    /// When to fall back to harvesting links instead of prose.
+    pub index_mode: IndexMode,
     /// Markdown rendering tuning.
     pub render: RenderOptions,
     /// If the chosen content root yields fewer than this many characters, redo
@@ -139,6 +171,7 @@ impl ExtractOptions {
     pub fn new() -> Self {
         ExtractOptions {
             denoise: DenoiseConfig::default(),
+            index_mode: IndexMode::default(),
             render: RenderOptions::default(),
             min_content_chars: 200,
         }
@@ -173,10 +206,12 @@ pub fn extract_with(html: &str, url: Option<&str>, opts: &ExtractOptions) -> Res
     let Some(root) = root else {
         return Ok(Article {
             url: url.map(str::to_string),
+            kind: ArticleKind::Article,
             meta,
             markdown: String::new(),
             text: String::new(),
             units: Vec::new(),
+            links: Vec::new(),
             stats: DenoiseStats { html_bytes: html.len(), ..Default::default() },
         });
     };
@@ -201,7 +236,7 @@ pub fn extract_with(html: &str, url: Option<&str>, opts: &ExtractOptions) -> Res
         && let Some(body) = body
         && body != root
     {
-        let mut fallback = markdown::Writer::new(&doc, &opts.denoise, &opts.render, base);
+        let mut fallback = markdown::Writer::new(&doc, &opts.denoise, &opts.render, base.clone());
         fallback.walk(body);
         let fallback_len = extracted(&fallback);
         // Walking `<body>` always sweeps up more boilerplate, so it only wins
@@ -210,6 +245,23 @@ pub fn extract_with(html: &str, url: Option<&str>, opts: &ExtractOptions) -> Res
         if fallback_len > current_len && (current_len < opts.min_content_chars || decisively_better)
         {
             writer = fallback;
+        }
+    }
+
+    // A page with no prose may still be a listing, where the links are the
+    // content rather than the boilerplate. Harvesting only runs once article
+    // extraction has already failed, so ordinary pages never take this path.
+    let mut kind = ArticleKind::Article;
+    let mut links = Vec::new();
+    let article_chars = extracted(&writer);
+    if opts.index_mode != IndexMode::Never && index::could_be_index(&doc, article_chars) {
+        let harvested = index::harvest(&doc, base.as_ref(), &opts.denoise);
+        if index::looks_like_index(&harvested, article_chars) {
+            kind = ArticleKind::Index;
+            writer.units = index::units_from_links(&harvested);
+            links = harvested;
+        } else if opts.index_mode == IndexMode::Always {
+            links = harvested;
         }
     }
 
@@ -230,7 +282,7 @@ pub fn extract_with(html: &str, url: Option<&str>, opts: &ExtractOptions) -> Res
     stats.html_bytes = html.len();
     stats.markdown_bytes = markdown.len();
 
-    Ok(Article { url: url.map(str::to_string), meta, markdown, text, units, stats })
+    Ok(Article { url: url.map(str::to_string), kind, meta, markdown, text, units, links, stats })
 }
 
 /// Extract many documents in parallel across the rayon pool.

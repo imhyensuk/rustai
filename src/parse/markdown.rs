@@ -345,7 +345,12 @@ impl<'d, 'a> Writer<'d, 'a> {
             md.push('\n');
             md.push_str(&pad(r.clone()));
         }
-        let plain = self.doc.inner_text(id);
+        // Derived from what was actually written, not from the source subtree.
+        // A mis-nested table can hold far more text than it renders, and a unit
+        // whose `text` disagrees with its `markdown` corrupts every downstream
+        // measurement — token budgets, density, and the "did we find an
+        // article?" test alike.
+        let plain = strip_markdown(&md);
         self.emit(UnitKind::Table, 0, plain, md);
     }
 

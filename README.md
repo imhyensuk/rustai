@@ -69,8 +69,8 @@ query ──▶ search router ──▶ fetcher ──▶ denoiser ──▶ sli
 |---|---|
 | Web search | `duckduckgo`, `searxng:<instance>` |
 | Reference | `wikipedia`, `wikipedia:ko` (any language edition) |
-| **Scholarly** | `arxiv`, `openalex`, `crossref` |
-| Sites you trust | `rss:<feed>`, `sitemap:<sitemap.xml>` |
+| Scholarly | `arxiv`, `openalex`, `crossref` |
+| Sites you trust | `rss:<feed>`, `sitemap:<sitemap.xml>`, `index:<front page>` |
 
 All keyless, all free, all queried concurrently; a provider that fails or
 rate-limits degrades the result set instead of failing the call.
@@ -81,6 +81,9 @@ stores abstracts as an inverted index for licensing reasons, and `rustai`
 reconstructs them, which makes its snippets the most informative of any provider
 here. arXiv results always point at the abstract page, never the PDF, because a
 PDF is not something this pipeline can read.
+
+`index:` harvests an HTML listing page — a front page, an archive, a forum — for
+the links it offers. A site with no feed and no sitemap is still collectable.
 
 OpenAlex and Crossref run a faster "polite pool" for callers who identify
 themselves — pass `contact_email` to use it.
@@ -129,6 +132,15 @@ pipe tables, absolutised links.
 The output is not one blob. It is a list of **units**, each carrying its own text,
 its Markdown, its heading breadcrumb and its token cost. That granularity is what
 makes the next stage possible.
+
+**Listing pages** take a different path. A front page defeats article extraction
+for the same reason navigation is boilerplate everywhere else — except here the
+link density *is* the content. `rustai` detects that by measuring how much of the
+page's prose belongs to a link, and returns an inventory instead: titles, URLs,
+standfirsts and section headings, ready to fetch. `article.kind` tells you which
+you got. On thirteen real pages spanning news front pages, aggregators, encyclopaedia
+articles, papers, READMEs and specs, the classifier is 12 for 12; it costs about
+1% of extraction time and `index_mode="never"` turns it off.
 
 ### 4. Slimmer — spend the context window deliberately
 
@@ -220,6 +232,17 @@ print(ctx.markdown)
 
 `max_tokens_per_source` caps how much any single page can contribute, so one long
 article cannot crowd out corroborating sources.
+
+### Listing pages
+
+```python
+front = rustai.extract(html, "https://news.example/")
+if front.kind == "index":
+    for link in front.links:
+        print(link.text, link.url, link.heading_path)
+    urls = [l.url for l in front.links]
+    articles = client.read(urls)      # now go read them
+```
 
 ### Scholarly search
 
