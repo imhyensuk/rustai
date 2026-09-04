@@ -5,7 +5,7 @@ Thanks for taking a look. Bug reports and pull requests are both welcome.
 ## Getting set up
 
 ```bash
-git clone https://github.com/hyeonseok-im/rustai
+git clone https://github.com/imhyeonsuk/rustai
 cd rustai
 python -m venv .venv && source .venv/bin/activate
 pip install maturin pytest

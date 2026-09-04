@@ -7,7 +7,7 @@
 #  끝나면 출력 전체를 복사해서 알려주세요 (/content/rustai-report.txt 로도 저장).
 # ══════════════════════════════════════════════════════════════════════════
 
-GITHUB_REPO     = ""                  # 예: "hyeonseok-im/rustai". 비우면 업로드한 sdist 사용
+GITHUB_REPO     = ""                  # 예: "imhyeonsuk/rustai". 비우면 업로드한 sdist 사용
 USE_DRIVE_CACHE = True                # 빌드한 휠을 구글 드라이브에 저장해 재사용
 FAST_BUILD      = True                # LTO를 꺼서 빌드 시간 단축 (동작은 동일)
 FORCE_REBUILD   = False               # 캐시를 무시하고 다시 빌드

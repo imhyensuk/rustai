@@ -158,5 +158,5 @@ First release.
   opt-in `nightly-simd` feature. Text scanning in this crate is SIMD-accelerated
   on stable regardless, via `memchr`.
 
-[Unreleased]: https://github.com/hyeonseok-im/rustai/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/hyeonseok-im/rustai/releases/tag/v0.1.0
+[Unreleased]: https://github.com/imhyeonsuk/rustai/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/imhyeonsuk/rustai/releases/tag/v0.1.0
