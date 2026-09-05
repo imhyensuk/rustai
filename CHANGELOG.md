@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Denoising thresholds tuned against a measured corpus rather than judgement.**
+  `benches/quality.py` scores extraction on real pages two ways — five-word
+  shingle overlap with the page's own article container, and a count of site
+  furniture that reached the output — because either alone points the wrong
+  way. Judged on overlap, the best setting is to switch every threshold off;
+  that quadruples the furniture, since the container being compared against
+  never held the navigation. `min_text_ratio` drops 0.06 → 0.02 and
+  `max_link_density` 0.5 → 0.6; `min_block_len` stays at 25, being the one
+  threshold that guards against furniture rather than widgets. F1 over 23 pages
+  goes 59.1% → 63.1% with furniture unchanged, and 7% more text is kept.
+
 ### Fixed
 
 - **`tl` does not treat script bodies as raw text, so a comparison operator in

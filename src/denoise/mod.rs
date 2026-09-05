@@ -130,11 +130,32 @@ pub struct DenoiseConfig {
 }
 
 impl Default for DenoiseConfig {
+    /// Tuned against `benches/quality.py`, which scores extraction on 23 real
+    /// pages two ways: five-word shingle overlap with the article container
+    /// (recall and precision), and a count of site furniture that leaked in.
+    /// Both are needed. Judged on overlap alone the right answer is to switch
+    /// every threshold off -- it scores best -- but that quadruples the
+    /// furniture, because the article container the score compares against
+    /// never contained the navigation in the first place.
+    ///
+    /// From the defaults these replace, F1 goes 59.1% to 63.1% with furniture
+    /// unchanged at 4 occurrences over 23 pages.
     fn default() -> Self {
         DenoiseConfig {
+            // Holds the line at 25. This is the one threshold that guards
+            // against furniture rather than against widgets: "Jump to
+            // content" is 17 characters and "Skip to main" is 12, so
+            // lowering it to 15 takes leaked furniture from 4 to 16.
             min_block_len: 25,
-            max_link_density: 0.5,
-            min_text_ratio: 0.06,
+            // 0.5 was costing recall for nothing measurable. Between 0.5 and
+            // 0.7 the link share of the output moves 6.7% to 7.1% while F1
+            // gains a point; 0.6 takes most of that for half the loosening.
+            max_link_density: 0.6,
+            // 0.06 was the single most expensive default: it drops legitimate
+            // markup-heavy content -- highlighted code, annotated tables --
+            // and buys almost no precision. Anything at or below 0.02 scores
+            // the same, so this keeps a floor rather than removing the test.
+            min_text_ratio: 0.02,
             drop_chrome: true,
             drop_by_class: true,
             keep_tables: true,
@@ -600,11 +621,14 @@ mod code_wrapper_tests {
     fn a_wrapper_around_code_survives_the_ratio_test() {
         // Shaped like the real thing: a `<span>` per token, each carrying a
         // slice of the theme, wrapped in a `<pre>` carrying the rest of it.
-        const TOKEN: &str = "<span style=\"color:#E06C75;font-weight:400\">";
+        const TOKEN: &str =
+            "<span class=\"tok\" style=\"color:#E06C75;font-weight:400;font-style:normal\">";
         let mut code = String::new();
         for i in 0..40 {
-            code.push_str("<span class=\"line\">");
-            for tok in ["let", "x", "=", "1"] {
+            code.push_str(
+                "<span class=\"line\" style=\"display:block;min-height:1lh;white-space:pre\">",
+            );
+            for tok in ["l", "x", "=", "1", ";", " "] {
                 code.push_str(TOKEN);
                 code.push_str(tok);
                 code.push_str("</span>");
