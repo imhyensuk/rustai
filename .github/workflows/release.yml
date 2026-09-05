@@ -48,6 +48,13 @@ jobs:
           args: --release --out dist
           sccache: "true"
           manylinux: ${{ matrix.platform.manylinux }}
+          # Install a toolchain rather than inheriting the runner's. Without
+          # this the build uses whatever rustc the image happens to ship, and
+          # a macOS image carrying 1.97.1 fails the crate's 1.98 MSRV -- with
+          # the same workflow that passed a day earlier, because the image
+          # rotated underneath it. Linux never saw this: those builds run in a
+          # manylinux container with its own Rust.
+          rust-toolchain: stable
           # wreq builds BoringSSL. btls-sys needs cmake, perl and a C++
           # toolchain to compile it, and bindgen -- which it also build-depends
           # on -- needs libclang to read the headers. Omitting clang is the
