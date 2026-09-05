@@ -198,6 +198,29 @@ pub(crate) fn class_weight(doc: &Doc<'_>, id: Id) -> f32 {
     w
 }
 
+/// Is this node's text mostly inside a code block?
+///
+/// A syntax highlighter turns ten lines of source into a `<span>` per token
+/// with a theme inlined as `style`, which reads as pure scaffolding to the
+/// text-to-markup ratio. The code is the content; the scaffolding is what
+/// displaying code costs.
+fn holds_mostly_code(doc: &Doc<'_>, id: Id) -> bool {
+    let text = doc.text_len(id);
+    if text == 0 {
+        return false;
+    }
+    let mut in_code = 0u32;
+    let mut stack = vec![id];
+    while let Some(node) = stack.pop() {
+        if matches!(doc.tag_name(node), "pre" | "code") {
+            in_code = in_code.saturating_add(doc.text_len(node));
+            continue; // 중첩된 code 를 두 번 세지 않는다
+        }
+        stack.extend(doc.children(node));
+    }
+    in_code * 2 >= text
+}
+
 /// Is this node boilerplate that should never reach the Markdown writer?
 pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     let name = doc.tag_name(id);
@@ -277,8 +300,15 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
         return true;
     }
 
-    // Markup-heavy, text-poor: a widget, a player shell, an ad slot.
-    if doc.html_len(id) > 512 && doc.text_ratio(id) < cfg.min_text_ratio {
+    // Markup-heavy, text-poor: a widget, a player shell, an ad slot -- unless
+    // the markup is a highlighter's and the text is source code. Exempting
+    // `<pre>` itself is not enough: a wrapper `<div>` around it is judged on
+    // its own, fails, and takes the code with it. Checked only on the way to
+    // rejecting, so the walk stays off the common path.
+    if doc.html_len(id) > 512
+        && doc.text_ratio(id) < cfg.min_text_ratio
+        && !holds_mostly_code(doc, id)
+    {
         return true;
     }
 
@@ -555,5 +585,70 @@ mod tests {
         let doc = Doc::parse(PAGE).unwrap();
         assert!(class_weight(&doc, id_of(&doc, "post-content")) > 0.0);
         assert!(class_weight(&doc, id_of(&doc, "ad-slot")) < 0.0);
+    }
+}
+
+#[cfg(test)]
+mod code_wrapper_tests {
+    use super::*;
+    use crate::parse::dom::Doc;
+
+    /// A highlighter's output is mostly markup by weight, and the `<div>` that
+    /// wraps it is judged on its own: it fails the ratio test, and the code
+    /// goes with it. Exempting `<pre>` alone does not save the wrapper.
+    #[test]
+    fn a_wrapper_around_code_survives_the_ratio_test() {
+        // Shaped like the real thing: a `<span>` per token, each carrying a
+        // slice of the theme, wrapped in a `<pre>` carrying the rest of it.
+        const TOKEN: &str = "<span style=\"color:#E06C75;font-weight:400\">";
+        let mut code = String::new();
+        for i in 0..40 {
+            code.push_str("<span class=\"line\">");
+            for tok in ["let", "x", "=", "1"] {
+                code.push_str(TOKEN);
+                code.push_str(tok);
+                code.push_str("</span>");
+            }
+            code.push_str("</span>\n");
+            let _ = i;
+        }
+        let html = format!(
+            "<html><body><article><p>{}</p>\
+             <div class=\"code-block-wrapper\"><pre class=\"astro-code\" \
+             style=\"--shiki-light:#abb2bf;--shiki-dark:#383A42;--shiki-light-bg:#282c34;\
+             --shiki-dark-bg:#FAFAFA;overflow-x:auto;white-space:pre-wrap\">\
+             <code>{code}</code></pre></div></article></body></html>",
+            "Prose with commas, at some length. ".repeat(6)
+        );
+        let doc = Doc::parse(&html).unwrap();
+        let cfg = DenoiseConfig::default();
+        let wrapper = doc
+            .preorder
+            .iter()
+            .copied()
+            .find(|&i| doc.signature(i).contains("code-block-wrapper"))
+            .expect("wrapper");
+        assert!(doc.text_ratio(wrapper) < cfg.min_text_ratio, "fixture is not markup-heavy");
+        assert!(!is_noise(&doc, wrapper, &cfg), "code wrapper was dropped");
+    }
+
+    /// The exemption is for code, not for every markup-heavy container.
+    #[test]
+    fn an_ordinary_widget_shell_is_still_dropped() {
+        let filler = "<div><span></span></div>".repeat(80);
+        let html = format!(
+            "<html><body><article><p>{}</p>\
+             <div class=\"player\">{filler}<i>x</i></div></article></body></html>",
+            "Prose with commas, at some length. ".repeat(20)
+        );
+        let doc = Doc::parse(&html).unwrap();
+        let cfg = DenoiseConfig::default();
+        let shell = doc
+            .preorder
+            .iter()
+            .copied()
+            .find(|&i| doc.signature(i).contains("player"))
+            .expect("shell");
+        assert!(is_noise(&doc, shell, &cfg), "widget shell survived");
     }
 }

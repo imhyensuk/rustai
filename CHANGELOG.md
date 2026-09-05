@@ -23,9 +23,12 @@ All notable changes to this project are documented here. The format follows
   classic `<h2><a>…</a></h2>` with the nesting inverted. Index harvesting looked
   only upwards and so found nothing at all on those pages.
 - Code blocks join tables in being exempt from the link-density and
-  text-to-markup tests. A syntax highlighter wraps every token in a `<span>` and
-  inlines a theme, so highlighted code fails both tests for the same reason a
-  data table does.
+  text-to-markup tests, and so does a container holding mostly code. A syntax
+  highlighter wraps every token in a `<span>` and inlines a theme, so
+  highlighted code fails both tests for the same reason a data table does —
+  and exempting `<pre>` alone does not help, because the `<div>` around it is
+  judged on its own, fails, and takes the code with it. On one Korean blog post
+  this recovered every code block (4 of 11 to 11 of 11) and three paragraphs.
 
 ## [0.1.0] — 2026-09-04
 
