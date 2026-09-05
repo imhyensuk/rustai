@@ -47,6 +47,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
       - run: cargo test --doc
+      # The PyO3 layer is behind a feature, so the default test build never
+      # compiles it -- and clippy alone does not run its tests.
+      - run: cargo test --features python
       - name: build with the headless-browser fallback
         run: cargo build --features browser
 
@@ -85,3 +88,6 @@ jobs:
       # The `network` tests are excluded: CI must not depend on third-party
       # services being up, and they would be rate-limited anyway.
       - run: pytest
+      # Editors read the stub, not __doc__, so the two have to say the same
+      # thing -- and they only do if something checks.
+      - run: python3 scripts/sync_stub_docs.py --check

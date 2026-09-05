@@ -477,7 +477,12 @@ impl PySearchResult {
     fn score(&self) -> f32 {
         self.inner.score
     }
-    /// Best rank at any single provider.
+    /// Best position this URL reached at any *single* provider, zero-based.
+    ///
+    /// Not this result's position in the fused list — for that, enumerate the
+    /// list you were handed. A result ranked first by two providers and a
+    /// result ranked first by one both report `0`; what separates them is
+    /// `score`, which is what the list is sorted by.
     #[getter]
     fn rank(&self) -> usize {
         self.inner.rank
@@ -748,8 +753,17 @@ impl PyClient {
 
     /// Fetch URLs concurrently.
     ///
-    /// With `raise_on_error=False` (the default) a failed URL is simply absent
-    /// from the result, so one dead link cannot lose you the other nineteen.
+    /// **The result is not 1:1 with the input.** With `raise_on_error=False`
+    /// (the default) a failed URL is simply absent, so one dead link cannot
+    /// lose you the other nineteen — but neither can you tell which one went,
+    /// and indexing the result against the input you passed will be wrong.
+    /// Match on `Page.url` instead, or pass `raise_on_error=True` when a
+    /// missing page is a problem rather than a nuisance.
+    ///
+    /// This differs deliberately from `extract_many`, which is 1:1 and raises:
+    /// there, an input is a document you already hold, and losing one silently
+    /// would be a bug in your own pipeline. Here an input is somebody else's
+    /// server, and it is allowed to be down.
     #[pyo3(signature = (urls, *, raise_on_error = false))]
     fn fetch(
         &self,
@@ -763,6 +777,9 @@ impl PyClient {
     }
 
     /// Fetch and extract in one step.
+    ///
+    /// **The result is not 1:1 with the input** — see `fetch`. Match on
+    /// `Article.url` rather than by position, or pass `raise_on_error=True`.
     #[pyo3(signature = (urls, *, raise_on_error = false))]
     fn read(
         &self,
@@ -823,6 +840,28 @@ fn parse_index_mode(mode: &str) -> PyResult<IndexMode> {
     }
 }
 
+/// Catch the most likely first mistake: handing `extract` a URL.
+///
+/// The library fetches, so `extract("https://…")` is a natural thing to try,
+/// and HTML that happens to be a bare URL is not a thing that exists. Left
+/// alone it returns an empty `Article` and the caller has nothing to go on.
+fn reject_url_as_html(html: &str) -> PyResult<()> {
+    let trimmed = html.trim();
+    let looks_like_url = trimmed.len() < 2048
+        && !trimmed.contains('<')
+        && !trimmed.contains(char::is_whitespace)
+        && (trimmed.starts_with("http://") || trimmed.starts_with("https://"));
+    if looks_like_url {
+        return Err(PyValueError::new_err(format!(
+            "expected HTML, got what looks like a URL ({trimmed:?}).\n\
+             `extract` takes markup you already have and does not fetch. To \
+             read a URL:\n    rustai.Client().read([{trimmed:?}])[0]\n\
+             or, for a whole question:\n    rustai.research(\"your question\")"
+        )));
+    }
+    Ok(())
+}
+
 /// Denoise a raw HTML string into Markdown. No network access.
 #[pyfunction]
 #[pyo3(signature = (html, url = None, *, include_links = true, include_images = false, include_tables = true, index_mode = "auto"))]
@@ -835,6 +874,7 @@ fn extract(
     include_tables: bool,
     index_mode: &str,
 ) -> PyResult<PyArticle> {
+    reject_url_as_html(html)?;
     let opts = ExtractOptions {
         render: RenderOptions { include_links, include_images, include_tables },
         denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
@@ -868,6 +908,9 @@ fn extract_many(
     include_tables: bool,
     index_mode: &str,
 ) -> PyResult<Vec<PyArticle>> {
+    for doc in &documents {
+        reject_url_as_html(doc)?;
+    }
     if let Some(urls) = &urls
         && urls.len() != documents.len()
     {
@@ -1039,4 +1082,27 @@ pub fn rustai_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BrowserError", m.py().get_type::<BrowserError>())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::reject_url_as_html;
+
+    #[test]
+    fn rejects_a_bare_url() {
+        assert!(reject_url_as_html("https://example.com/x").is_err());
+        assert!(reject_url_as_html("  http://example.com  ").is_err());
+    }
+
+    /// Everything that is plausibly markup, or prose, has to pass -- including
+    /// a document that merely mentions a URL, and one with no tags at all.
+    #[test]
+    fn passes_anything_that_could_be_a_document() {
+        assert!(reject_url_as_html("<p>hi</p>").is_ok());
+        assert!(reject_url_as_html("").is_ok());
+        assert!(reject_url_as_html("just some prose").is_ok());
+        assert!(reject_url_as_html("see https://example.com for more").is_ok());
+        assert!(reject_url_as_html("<a href=\"https://example.com\">x</a>").is_ok());
+        assert!(reject_url_as_html("ftp://example.com/file").is_ok());
+    }
 }
