@@ -286,7 +286,15 @@ class Context:
         ...
     @property
     def selected(self) -> list[dict[str, Any]]:
-        """Per-unit selection detail, as dicts."""
+        """Why each unit was chosen, as dicts.
+
+        Keys: `source` and `unit`, which are indices rather than text --
+        `articles[source].units[unit]` is the block itself -- plus `tokens`
+        and the three scores behind the decision: `relevance` (BM25 against
+        the query), `density` (nouns and numbers over filler) and the combined
+        `score`. Enough to answer "why is this in my context window and that
+        paragraph is not".
+        """
         ...
     @property
     def units_considered(self) -> int:

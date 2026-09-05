@@ -84,20 +84,39 @@ def main():
         if not doc or ast.get_docstring(node) == doc:
             continue
         if isinstance(node, ast.ClassDef):
-            edits.append((first_line_of(node.body[0]) - 1, indent, doc, None))
+            # A class docstring that merely changed is replaced in place;
+            # a missing one is inserted above the first member.
+            existing = node.body[0] if ast.get_docstring(node) else None
+            at = (existing.lineno - 1) if existing else (first_line_of(node.body[0]) - 1)
+            edits.append((at, indent, doc, existing))
         else:
             edits.append((node.lineno - 1, indent, doc, node))
 
     out = list(lines)
     for ln, indent, doc, node in sorted(edits, key=lambda e: (-e[0], e[3] is None)):
-        if node is not None:
-            end = node.end_lineno - 1
-            text = "\n".join(out[ln:end + 1]).rstrip()
-            if text.endswith("..."):
-                head = text[: text.rfind("...")].rstrip().rstrip(":")
-                out[ln:end + 1] = [head + ":"] + render(doc, indent) + [f"{indent}..."]
-                continue
-        out[ln:ln] = render(doc, indent)
+        if node is None:
+            out[ln:ln] = render(doc, indent)
+            continue
+        end = node.end_lineno - 1
+        text = "\n".join(out[ln:end + 1]).rstrip()
+        if isinstance(node, ast.Expr):        # 클래스 독스트링만 교체
+            out[ln:end + 1] = render(doc, indent)
+            continue
+        # A signature that already carries a docstring has to lose it, or the
+        # replacement lands after it and the result does not parse. Cutting at
+        # the first line whose content is the opening quotes is enough: the
+        # stub is generated, so the shape is always `def …:` then a docstring
+        # then `...`.
+        body_start = next(
+            (i for i in range(ln, end + 1) if out[i].lstrip().startswith('"""')),
+            None,
+        )
+        cut = (body_start if body_start is not None else end + 1) - 1
+        head = "\n".join(out[ln:cut + 1]).rstrip()
+        if head.endswith("..."):
+            head = head[: head.rfind("...")].rstrip()
+        head = head.rstrip().rstrip(":")
+        out[ln:end + 1] = [head + ":"] + render(doc, indent) + [f"{indent}..."]
 
     open(PATH, "w", encoding="utf-8").write("\n".join(out) + "\n")
     print(f"{len(edits)} docstrings synced")
