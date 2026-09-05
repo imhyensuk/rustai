@@ -19,11 +19,19 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { os: ubuntu-latest,  target: x86_64,  manylinux: 2_28 }
-          - { os: ubuntu-latest,  target: aarch64, manylinux: 2_28 }
-          - { os: macos-latest,   target: aarch64, manylinux: auto }
-          - { os: macos-13,       target: x86_64,  manylinux: auto }
-          - { os: windows-latest, target: x64,     manylinux: auto }
+          - { os: ubuntu-latest,    target: x86_64,  manylinux: 2_28 }
+          # Built on a native arm64 runner rather than cross-compiled from
+          # x86_64. Cross-compiling this crate means cross-compiling BoringSSL,
+          # whose build wants a full aarch64 toolchain and whose bindgen step
+          # wants an aarch64 sysroot to find the system headers in -- the same
+          # wall a local zig attempt hit. GitHub's arm64 runners are free on
+          # public repositories, so the honest fix is to stop cross-compiling:
+          # the identical before-script that succeeds on x86_64 then runs
+          # natively here.
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: 2_28 }
+          - { os: macos-latest,     target: aarch64, manylinux: auto }
+          - { os: macos-13,         target: x86_64,  manylinux: auto }
+          - { os: windows-latest,   target: x64,     manylinux: auto }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
