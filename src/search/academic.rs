@@ -529,3 +529,100 @@ mod openalex_query_tests {
         assert_eq!(openalex_search_term("Müller & Sons: a study!"), "Müller & Sons: a study!");
     }
 }
+
+/// Europe PMC — the life-sciences literature, in one request.
+///
+/// Preferred over PubMed's E-utilities, which need two round trips (search
+/// for identifiers, then fetch their summaries) to reach the same place.
+/// Europe PMC indexes PubMed and PMC alongside preprints and patents, and
+/// `resultType=core` returns the abstract with the metadata.
+pub(crate) async fn europe_pmc(
+    fetcher: &Fetcher,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<RawHit>> {
+    let q = utf8_percent_encode(query, NON_ALPHANUMERIC);
+    let url = format!(
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/search\
+         ?query={q}&format=json&pageSize={limit}&resultType=core"
+    );
+    let page = fetcher.fetch_api(&url).await?;
+    parse_europe_pmc(&page.body, limit)
+}
+
+/// Parse a Europe PMC `search` response.
+pub(crate) fn parse_europe_pmc(body: &str, limit: usize) -> Result<Vec<RawHit>> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| Error::provider("europepmc", format!("bad json: {e}")))?;
+    let results = value
+        .get("resultList")
+        .and_then(|l| l.get("result"))
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| Error::provider("europepmc", "response had no resultList.result"))?;
+
+    Ok(results
+        .iter()
+        .filter_map(|item| {
+            let field = |key: &str| {
+                item.get(key).and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty())
+            };
+            let title = field("title")?;
+            // Every record has a source and an id; a DOI is not guaranteed,
+            // and a PMID even less so for preprints.
+            let url = match (field("source"), field("id")) {
+                (Some(source), Some(id)) => format!("https://europepmc.org/article/{source}/{id}"),
+                _ => format!("https://doi.org/{}", field("doi")?),
+            };
+            // `authorString` is one comma-separated line, where the shared
+            // snippet builder wants the names apart so it can decide where
+            // to stop and add "et al.".
+            let authors: Vec<String> = field("authorString")
+                .unwrap_or_default()
+                .split(',')
+                .map(|a| a.trim().trim_end_matches('.').to_string())
+                .filter(|a| !a.is_empty())
+                .collect();
+            let year = field("pubYear").unwrap_or_default();
+            // Abstracts arrive as JATS, the same markup Crossref sends.
+            let body = field("abstractText").map(|a| strip_tags(&a)).unwrap_or_default();
+            Some(RawHit {
+                title: strip_tags(&title),
+                url,
+                snippet: scholarly_snippet(&authors, &year, &body),
+            })
+        })
+        .take(limit)
+        .collect())
+}
+
+#[cfg(test)]
+mod europe_pmc_tests {
+    use super::parse_europe_pmc;
+
+    #[test]
+    fn builds_a_url_from_source_and_id() {
+        let body = r#"{"resultList":{"result":[{"id":"42281096","source":"MED",
+            "title":"Rare-disease diagnosis","authorString":"Islam MS, Jamal A, Alkhathlan A.",
+            "pubYear":"2026","abstractText":"<title>Abstract</title><p>Diagnosis is hard.</p>"}]}}"#;
+        let hits = parse_europe_pmc(body, 10).unwrap();
+        assert_eq!(hits[0].url, "https://europepmc.org/article/MED/42281096");
+        assert!(hits[0].snippet.contains("Islam MS, Jamal A, Alkhathlan A (2026)"));
+        assert!(hits[0].snippet.contains("Diagnosis is hard."), "JATS survived");
+        assert!(!hits[0].snippet.contains("<p>"));
+    }
+
+    /// A preprint has no PMID and often no DOI; source and id always exist.
+    #[test]
+    fn a_preprint_still_resolves() {
+        let body = r#"{"resultList":{"result":[{"id":"PPR1302687","source":"PPR",
+            "title":"BM25 and Dense Retrieval Are Complementary","pubYear":"2026"}]}}"#;
+        let hits = parse_europe_pmc(body, 10).unwrap();
+        assert_eq!(hits[0].url, "https://europepmc.org/article/PPR/PPR1302687");
+    }
+
+    #[test]
+    fn an_empty_result_list_is_not_an_error() {
+        let body = r#"{"resultList":{"result":[]}}"#;
+        assert!(parse_europe_pmc(body, 10).unwrap().is_empty());
+    }
+}

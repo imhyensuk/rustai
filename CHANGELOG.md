@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Four more search providers, taking the router from nine kinds to thirteen.**
+  All keyless, all verified against the live APIs before being written:
+  - `europepmc` — the life sciences, covering PubMed, PMC and preprints in one
+    request where PubMed's own API needs two. Abstracts arrive as JATS, the
+    same markup Crossref sends, and are stripped the same way.
+  - `hackernews` — via the Algolia index behind the site's own search. A story
+    points at what it links to; a `Show HN` has no link of its own, so the
+    thread is the destination.
+  - `stackexchange` — Stack Overflow by default, any site by key
+    (`stackexchange:serverfault`). Requested with the `withbody` filter,
+    without which the API returns titles and scores that rank a result but
+    answer nothing.
+  - `github` — repository search, with the language and star count that decide
+    whether a result is worth opening.
+
+  Semantic Scholar was tried and dropped: it rate-limits unauthenticated
+  callers hard enough that a provider fired concurrently with the others
+  fails more often than it answers.
+
 ### Changed
 
 - **Denoising thresholds tuned against a measured corpus rather than judgement.**

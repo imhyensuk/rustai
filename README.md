@@ -159,7 +159,8 @@ query ──▶ search router ──▶ fetcher ──▶ denoiser ──▶ sli
 |---|---|
 | Web search | `duckduckgo`, `searxng:<instance>` |
 | Reference | `wikipedia`, `wikipedia:ko` (any language edition) |
-| Scholarly | `arxiv`, `openalex`, `crossref` |
+| Scholarly | `arxiv`, `openalex`, `crossref`, `europepmc` |
+| Community | `hackernews`, `stackexchange`, `stackexchange:<site>`, `github` |
 | Sites you trust | `rss:<feed>`, `sitemap:<sitemap.xml>`, `index:<front page>` |
 
 All keyless, all free, all queried concurrently; a provider that fails or
@@ -171,6 +172,17 @@ stores abstracts as an inverted index for licensing reasons, and `rustai`
 reconstructs them, which makes its snippets the most informative of any provider
 here. arXiv results always point at the abstract page, never the PDF, because a
 PDF is not something this pipeline can read.
+
+`europepmc` covers the life sciences — PubMed, PMC and preprints — in one
+request, where PubMed's own API needs two.
+
+The community providers answer a different kind of question. A paper explains
+what a method is; a Stack Exchange thread explains why it did not work for
+somebody, a Hacker News thread explains what practitioners argued about it, and
+a GitHub result says whether anyone implemented it. `stackexchange` defaults to
+Stack Overflow and takes any site key — `stackexchange:serverfault`,
+`stackexchange:stats`. GitHub search is capped at ten requests a minute without
+a token, which one query per search fits inside.
 
 `index:` harvests an HTML listing page — a front page, an archive, a forum — for
 the links it offers. A site with no feed and no sitemap is still collectable.

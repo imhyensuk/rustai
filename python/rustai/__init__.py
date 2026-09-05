@@ -32,9 +32,13 @@ collected as link inventories rather than prose, and work as a source::
 Scholarly sources are first-class alongside web search::
 
     client = rustai.Client(
-        providers=["arxiv", "openalex", "crossref", "duckduckgo"],
+        providers=["arxiv", "openalex", "crossref", "europepmc", "duckduckgo"],
         contact_email="you@example.com",   # OpenAlex/Crossref polite pool
     )
+
+Some questions are answered by a conversation rather than a paper::
+
+    client = rustai.Client(providers=["hackernews", "stackexchange", "github"])
 
 Everything blocking releases the GIL, so these calls parallelise across threads.
 """

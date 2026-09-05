@@ -10,6 +10,7 @@
 //! what worked.
 
 mod academic;
+mod community;
 mod duckduckgo;
 mod feeds;
 mod searxng;
@@ -62,6 +63,16 @@ pub enum Provider {
     OpenAlex,
     /// Crossref, the DOI registry's metadata index.
     Crossref,
+    /// Europe PMC — the life-sciences literature, including PubMed, PMC and
+    /// preprints, in a single request.
+    EuropePmc,
+    /// Hacker News, through the Algolia index behind its own search.
+    HackerNews,
+    /// Stack Exchange search over one site, by site key (`stackoverflow` by
+    /// default).
+    StackExchange(String),
+    /// GitHub repository search.
+    GitHub,
     /// The MediaWiki search API for a given language code.
     Wikipedia(String),
     /// A SearXNG instance, by base URL.
@@ -83,6 +94,10 @@ impl Provider {
             Provider::Arxiv => "arxiv",
             Provider::OpenAlex => "openalex",
             Provider::Crossref => "crossref",
+            Provider::EuropePmc => "europepmc",
+            Provider::HackerNews => "hackernews",
+            Provider::StackExchange(_) => "stackexchange",
+            Provider::GitHub => "github",
             Provider::Wikipedia(_) => "wikipedia",
             Provider::SearxNG(_) => "searxng",
             Provider::Rss(_) => "rss",
@@ -106,6 +121,16 @@ impl Provider {
             "arxiv" => Provider::Arxiv,
             "openalex" => Provider::OpenAlex,
             "crossref" => Provider::Crossref,
+            "europepmc" | "pubmed" | "pmc" => Provider::EuropePmc,
+            "hackernews" | "hn" => Provider::HackerNews,
+            "stackexchange" | "stackoverflow" | "se" => {
+                Provider::StackExchange(if arg.is_empty() {
+                    "stackoverflow".into()
+                } else {
+                    arg.into()
+                })
+            }
+            "github" | "gh" => Provider::GitHub,
             "wikipedia" | "wiki" => {
                 Provider::Wikipedia(if arg.is_empty() { "en".into() } else { arg.into() })
             }
@@ -224,6 +249,12 @@ impl Router {
                     Provider::Crossref => {
                         academic::crossref(&fetcher, &query, limit, contact.as_deref()).await
                     }
+                    Provider::EuropePmc => academic::europe_pmc(&fetcher, &query, limit).await,
+                    Provider::HackerNews => community::hacker_news(&fetcher, &query, limit).await,
+                    Provider::StackExchange(site) => {
+                        community::stack_exchange(&fetcher, site, &query, limit).await
+                    }
+                    Provider::GitHub => community::github(&fetcher, &query, limit).await,
                     Provider::Wikipedia(lang) => {
                         wikipedia::search(&fetcher, &query, lang, limit).await
                     }
