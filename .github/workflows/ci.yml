@@ -24,6 +24,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: version is consistent across manifests
+        run: python3 scripts/check_version.py
       - run: cargo fmt --all --check
       # Never `--all-features`: `nightly-simd` enables tl's portable_simd,
       # which does not build on stable. Each real combination is linted instead.

@@ -75,6 +75,21 @@ jobs:
           name: wheel-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
+  # Runs before anything is built, so a tag that disagrees with the manifests
+  # stops the release rather than publishing the wrong number on it.
+  version:
+    name: version matches the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: manifests agree with each other
+        run: python3 scripts/check_version.py
+      # Only a tagged run has a version to compare against; a dispatch from a
+      # branch is a build rehearsal and has nothing to disagree with.
+      - name: manifests agree with the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python3 scripts/check_version.py "${GITHUB_REF_NAME}"
+
   sdist:
     name: sdist
     runs-on: ubuntu-latest
@@ -91,7 +106,7 @@ jobs:
 
   pypi:
     name: publish to PyPI
-    needs: [wheels, sdist]
+    needs: [version, wheels, sdist]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     environment: pypi
@@ -107,6 +122,7 @@ jobs:
 
   crates:
     name: publish to crates.io
+    needs: [version]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     environment: crates-io
