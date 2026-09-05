@@ -145,13 +145,34 @@ pub(crate) fn parse_arxiv(xml: &str) -> Vec<RawHit> {
 // ---------------------------------------------------------------- OpenAlex
 
 /// Search OpenAlex, the open index of ~250M scholarly works.
+/// Strip the characters OpenAlex reads as wildcard operators.
+///
+/// `?` and `*` are wildcards in a `search=` value, and supplying either
+/// without an exact-match qualifier is rejected outright:
+///
+/// ```text
+/// 400 {"error":"Invalid query parameters error.",
+///      "message":"Wildcards (* or ?) require exact ..."}
+/// ```
+///
+/// Which means a question — "how does BM25 normalise for document length?" —
+/// fails on its question mark, and a research query is usually a question.
+/// Removing them costs nothing: neither character carries meaning for a
+/// relevance search, and the provider offers no way to escape them.
+fn openalex_search_term(query: &str) -> String {
+    let cleaned: String =
+        query.chars().map(|c| if c == '?' || c == '*' { ' ' } else { c }).collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub(crate) async fn openalex(
     fetcher: &Fetcher,
     query: &str,
     limit: usize,
     contact: Option<&str>,
 ) -> Result<Vec<RawHit>> {
-    let q = utf8_percent_encode(query, NON_ALPHANUMERIC);
+    let term = openalex_search_term(query);
+    let q = utf8_percent_encode(&term, NON_ALPHANUMERIC);
     let mut url = format!("https://api.openalex.org/works?search={q}&per-page={limit}");
     if let Some(email) = contact {
         url.push_str(&format!("&mailto={}", utf8_percent_encode(email, NON_ALPHANUMERIC)));
@@ -478,5 +499,33 @@ mod tests {
         let s = scholarly_snippet(&[], "", &long);
         assert!(s.chars().count() <= MAX_SNIPPET_CHARS + 1);
         assert!(s.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod openalex_query_tests {
+    use super::openalex_search_term;
+
+    /// A research query is usually a question, and OpenAlex rejects the
+    /// question mark as an unqualified wildcard.
+    #[test]
+    fn strips_wildcards_openalex_rejects() {
+        assert_eq!(
+            openalex_search_term("How does BM25 normalise for document length?"),
+            "How does BM25 normalise for document length"
+        );
+        assert_eq!(
+            openalex_search_term("BM25는 문서 길이를 정규화하는가?"),
+            "BM25는 문서 길이를 정규화하는가"
+        );
+        assert_eq!(openalex_search_term("wild*card"), "wild card");
+        assert_eq!(openalex_search_term("what? why? how?"), "what why how");
+    }
+
+    /// Everything else is left alone, including punctuation the API accepts.
+    #[test]
+    fn leaves_ordinary_queries_untouched() {
+        assert_eq!(openalex_search_term("BM25 ranking"), "BM25 ranking");
+        assert_eq!(openalex_search_term("Müller & Sons: a study!"), "Müller & Sons: a study!");
     }
 }
