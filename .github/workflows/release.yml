@@ -30,7 +30,11 @@ jobs:
           # natively here.
           - { os: ubuntu-24.04-arm, target: aarch64, manylinux: 2_28 }
           - { os: macos-latest,     target: aarch64, manylinux: auto }
-          - { os: macos-13,         target: x86_64,  manylinux: auto }
+          # Not macos-13: that image was retired in December 2025, and a job
+          # asking for it is not rejected -- it queues for a runner that will
+          # never be assigned, so the release hangs rather than fails.
+          # macos-15-intel is the replacement label for x86_64 macOS.
+          - { os: macos-15-intel,   target: x86_64,  manylinux: auto }
           - { os: windows-latest,   target: x64,     manylinux: auto }
     steps:
       - uses: actions/checkout@v4
