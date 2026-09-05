@@ -42,19 +42,19 @@ See [Benchmarks](#benchmarks) for how those numbers were produced.
 
 ## Try it in Colab
 
-[`notebooks/colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb) runs the
-whole pipeline in a browser — offline denoising, live collection, the search
-providers, a benchmark against `trafilatura`, and a look at the TLS fingerprints.
+[`notebooks/colab_extreme.ipynb`](notebooks/colab_extreme.ipynb) is the one to
+open. Nine sections, each measuring something rather than claiming it: a listing
+page turned into a crawl frontier, concurrency held against itself, thirty pages
+fetched and extracted with the memory measured, eight provider kinds fused, the
+token budget checked at six sizes, a benchmark against `trafilatura`, and the
+whole pipeline down to a prompt. Installing is one `pip` line, so the notebook
+spends its length on the library rather than on a build.
 
-[`notebooks/colab_oneshot.ipynb`](notebooks/colab_oneshot.ipynb) is the same
-thing as a single cell: build, install, and a report covering denoising
-accuracy, throughput, live fetches, every provider, and the pipeline end to end.
-
-Until wheels are on PyPI, Colab has to build from source, and the BoringSSL
-dependency makes that a 10–20 minute first run. Both notebooks cache the wheel
-to Drive, so every session after the first installs in seconds. They install
-`clang` and `libclang-dev` before building: BoringSSL's bindings run `bindgen`,
-which needs `libclang`, and the Colab base image does not ship it.
+[`colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb) walks the same
+ground more slowly, and [`colab_oneshot.ipynb`](notebooks/colab_oneshot.ipynb)
+is a single cell that installs and prints a report. Both predate the PyPI
+release and still know how to build from source, which is only useful now if you
+want the `browser` feature.
 
 ## Install
 
@@ -70,6 +70,80 @@ For the Rust crate (published as `rustai-core`, since `rustai` was taken on crat
 ```bash
 cargo add rustai-core
 ```
+
+## Five minutes
+
+Each step below runs on its own and answers the question the previous one
+leaves you with. Nothing here needs configuring first.
+
+**1 — Ask a question.** Search, fetch, clean and compress, in one call.
+
+```python
+import rustai
+
+r = rustai.research("how does BM25 handle document length", max_tokens=1024)
+print(r.markdown)          # cited Markdown, ready to paste into a prompt
+```
+
+**2 — See what it cost, and what it skipped.** A retrieval step you cannot
+account for is one you cannot debug.
+
+```python
+print(r.context.tokens)                    # 1017 — under the 1024 you asked for
+for src in r.context.sources:
+    print(src["tokens"], src["url"])       # who contributed what
+for stage, why in r.failures:
+    print("skipped:", stage, why)          # dead links say so
+```
+
+The budget is a guarantee, not an estimate: the slimmer renders, measures, drops
+the weakest unit and repeats until the real total fits.
+
+**3 — Clean HTML you already have.** No network, no client, no keys — useful for
+seeing what the denoiser does before you trust it with anything.
+
+```python
+article = rustai.extract(html, url="https://example.com/post")
+
+article.markdown              # nav, footer, ads and share widgets gone
+article.units                 # the same thing as rankable blocks
+article.stats.compression     # how much was dropped
+```
+
+If you pass a URL here by mistake it will tell you so — `extract` does not
+fetch. Use step 4 for that.
+
+**4 — Bring your own URLs.** Read pages, then compress them against a query of
+your choosing.
+
+```python
+client = rustai.Client(contact_email="you@example.com")
+articles = client.read([
+    "https://en.wikipedia.org/wiki/Okapi_BM25",
+    "https://en.wikipedia.org/wiki/Tf%E2%80%93idf",
+])
+
+ctx = rustai.slim("document length normalisation", articles, max_tokens=800)
+print(ctx.markdown)
+```
+
+`read` fetches concurrently and drops URLs that failed, so the list you get back
+may be shorter than the one you passed. Match on `Article.url`, or pass
+`raise_on_error=True`.
+
+**5 — Follow a front page.** Listing pages come back as link inventories rather
+than prose, which makes them usable as crawl seeds.
+
+```python
+front = client.read(["https://blog.rust-lang.org/"])[0]
+front.kind                    # "index"
+for link in front.links:
+    print(link.text, link.url, link.snippet)
+```
+
+**Where to go next:** [Usage](#usage) for the full surface, [Being a good
+citizen](#being-a-good-citizen) before you point it at anyone else's server, and
+the Colab notebook above if you would rather run than read.
 
 ## What it does, stage by stage
 
