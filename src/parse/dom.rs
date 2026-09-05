@@ -32,6 +32,102 @@ pub(crate) fn decode_entities(s: &str) -> Cow<'_, str> {
 /// and far below the serialised JSON that annotation-heavy generators attach.
 const ATTR_VALUE_WEIGHT_CAP: u32 = 128;
 
+/// Elements whose content HTML defines as raw text, and which `tl` does not.
+const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
+
+/// Neutralise raw-text element bodies before the parser sees them.
+///
+/// HTML says the content of `<script>` and `<style>` is raw text: nothing
+/// inside starts a tag until the matching end tag. `tl` does not implement
+/// that, so a `<` followed by a letter opens an element -- and minified
+/// JavaScript is full of them. `for(i=0;i<n;i++)` is enough: the phantom
+/// `<n…>` consumes the real `</script>`, the script stays open, and it
+/// swallows the rest of the document. Every node after it then sits inside a
+/// `<script>`, which the denoiser drops on sight, so the page extracts to
+/// nothing. WordPress ships such a script on every page it renders.
+///
+/// The body is deleted rather than escaped, because nothing here reads it --
+/// with one exception. `<script type="application/ld+json">` carries the
+/// metadata that `Doc::raw_text` parses, so its body is kept with `<` escaped
+/// instead; `raw_text` decodes entities, so the JSON arrives intact.
+pub(crate) fn neutralise_raw_text(html: &str) -> Cow<'_, str> {
+    let bytes = html.as_bytes();
+    if !RAW_TEXT_ELEMENTS.iter().any(|t| find_tag(bytes, t, 0).is_some()) {
+        return Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+    while cursor < html.len() {
+        let Some((start, tag)) = RAW_TEXT_ELEMENTS
+            .iter()
+            .filter_map(|t| find_tag(bytes, t, cursor).map(|i| (i, *t)))
+            .min_by_key(|(i, _)| *i)
+        else {
+            break;
+        };
+        let Some(open_end) = end_of_open_tag(bytes, start) else { break };
+        out.push_str(&html[cursor..=open_end]);
+
+        let close = format!("</{tag}");
+        let body_end = find_ci(bytes, close.as_bytes(), open_end + 1).unwrap_or(html.len());
+        let keeps_body = html[start..=open_end].to_ascii_lowercase().contains("json");
+        if keeps_body {
+            out.push_str(&html[open_end + 1..body_end].replace('<', "&lt;"));
+        }
+        cursor = body_end;
+    }
+    out.push_str(&html[cursor.min(html.len())..]);
+    Cow::Owned(out)
+}
+
+/// Position of `<name` at or after `from`, where the name is followed by a
+/// delimiter -- so `<style` matches but `<styles` does not.
+fn find_tag(bytes: &[u8], name: &str, from: usize) -> Option<usize> {
+    let needle = format!("<{name}");
+    let mut at = from;
+    while let Some(i) = find_ci(bytes, needle.as_bytes(), at) {
+        match bytes.get(i + needle.len()) {
+            Some(b' ' | b'>' | b'/' | b'\t' | b'\n' | b'\r') => return Some(i),
+            _ => at = i + 1,
+        }
+    }
+    None
+}
+
+/// ASCII-case-insensitive substring search.
+fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if from >= haystack.len() {
+        return None;
+    }
+    let first = needle[0].to_ascii_lowercase();
+    let mut at = from;
+    while at + needle.len() <= haystack.len() {
+        let i = memchr::memchr2(first, first.to_ascii_uppercase(), &haystack[at..])? + at;
+        if i + needle.len() > haystack.len() {
+            return None;
+        }
+        if haystack[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(i);
+        }
+        at = i + 1;
+    }
+    None
+}
+
+/// End of an opening tag, respecting quoted attribute values.
+fn end_of_open_tag(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, &b) in bytes[start..].iter().enumerate() {
+        match (quote, b) {
+            (Some(q), c) if c == q => quote = None,
+            (None, b'"' | b'\'') => quote = Some(b),
+            (None, b'>') => return Some(start + offset),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Index into the node arena.
 pub(crate) type Id = usize;
 
@@ -483,5 +579,64 @@ mod tests {
         assert_eq!(doc.parent(p), Some(article));
         let pos = |id: Id| doc.preorder.iter().position(|&x| x == id).unwrap();
         assert!(pos(article) < pos(p), "ancestors must precede descendants");
+    }
+}
+
+#[cfg(test)]
+mod raw_text_tests {
+    use super::neutralise_raw_text;
+
+    /// The bug this exists for: a comparison operator in minified JavaScript
+    /// reads as the start of a tag, and the phantom element eats the document.
+    #[test]
+    fn a_comparison_in_a_script_no_longer_opens_a_tag() {
+        for js in ["for(i=0;i<n;i++){}", "if(a<1){}", "x()<e.timestamp+1", "a<b&&c<d"] {
+            let html = format!("<html><body><script>{js}</script><div>KEEP</div></body></html>");
+            let out = neutralise_raw_text(&html);
+            assert!(!out.contains(js), "script body survived: {out}");
+            assert!(out.contains("<div>KEEP</div>"), "document truncated: {out}");
+        }
+    }
+
+    /// JSON-LD is the one body that is read, so it is escaped rather than
+    /// dropped. `raw_text` decodes entities, so the reader still sees `<`.
+    #[test]
+    fn json_ld_survives_escaped() {
+        let html = r#"<script type="application/ld+json">{"name":"a<b"}</script>"#;
+        let out = neutralise_raw_text(html);
+        assert!(out.contains(r#"{"name":"a&lt;b"}"#), "{out}");
+    }
+
+    #[test]
+    fn style_bodies_go_too() {
+        let html = "<style>.a{color:red}</style><p>x</p>";
+        let out = neutralise_raw_text(html);
+        assert!(!out.contains("color:red"));
+        assert!(out.contains("<p>x</p>"));
+    }
+
+    /// Case, attributes with `>` inside quotes, and a missing close tag.
+    #[test]
+    fn handles_the_awkward_shapes() {
+        let out = neutralise_raw_text(r#"<SCRIPT TYPE="text/javascript">a<b</SCRIPT><p>x</p>"#);
+        assert!(out.contains("<p>x</p>"), "{out}");
+        let out = neutralise_raw_text(r#"<script data-x="a>b">i<n</script><p>y</p>"#);
+        assert!(out.contains("<p>y</p>"), "{out}");
+        let out = neutralise_raw_text("<script>unterminated i<n");
+        assert!(!out.contains("i<n"), "{out}");
+    }
+
+    /// A document with neither element is handed back untouched, not copied.
+    #[test]
+    fn no_raw_text_elements_means_no_allocation() {
+        let html = "<html><body><p>plain</p></body></html>";
+        assert!(matches!(neutralise_raw_text(html), std::borrow::Cow::Borrowed(_)));
+    }
+
+    /// `<styles>` is not `<style>`.
+    #[test]
+    fn only_matches_whole_tag_names() {
+        let html = "<styleguide>a<b</styleguide><p>z</p>";
+        assert!(matches!(neutralise_raw_text(html), std::borrow::Cow::Borrowed(_)));
     }
 }

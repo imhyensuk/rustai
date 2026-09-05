@@ -6,7 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`tl` does not treat script bodies as raw text, so a comparison operator in
+  minified JavaScript swallowed the page.** HTML says nothing inside `<script>`
+  starts a tag until the end tag; `tl` opens one anyway, so `for(i=0;i<n;i++)`
+  produces a phantom `<n…>` that consumes the real `</script>`. The script then
+  stays open and every node after it becomes its descendant — and the denoiser
+  drops scripts on sight, so the page extracts to almost nothing. Script and
+  style bodies are now removed before parsing, and `application/ld+json` is kept
+  with `<` escaped so the metadata reader still sees it. Measured over 46 real
+  pages, 7% carry such a script; one of them went from 5.9% of its text
+  extracted to 76.7%.
+- **A link that wraps a heading is titular.** Modern listings make the whole
+  card an anchor — `<a><h2>Title</h2><span>Read More</span></a>` — which is the
+  classic `<h2><a>…</a></h2>` with the nesting inverted. Index harvesting looked
+  only upwards and so found nothing at all on those pages.
+- Code blocks join tables in being exempt from the link-density and
+  text-to-markup tests. A syntax highlighter wraps every token in a `<span>` and
+  inlines a theme, so highlighted code fails both tests for the same reason a
+  data table does.
 
 ## [0.1.0] — 2026-09-04
 

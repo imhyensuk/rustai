@@ -283,6 +283,19 @@ fn is_entry_metadata(text: &str) -> bool {
 
 /// Is this link an entry title rather than a link inside a sentence?
 fn is_titular(doc: &Doc<'_>, id: Id) -> bool {
+    // A link that *wraps* a heading is titular by any reading of the word.
+    // Modern listings make the whole card the anchor -- `<a><h2>Title</h2>
+    // <span>Read More</span></a>` -- which is the same relationship as the
+    // classic `<h2><a>Title</a></h2>` with the nesting inverted. Checking only
+    // upwards misses it, and misses it silently: the page harvests to nothing.
+    if doc
+        .descendants(id)
+        .iter()
+        .skip(1)
+        .any(|&d| matches!(doc.tag_name(d), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"))
+    {
+        return true;
+    }
     let mut cur = id;
     while let Some(parent) = doc.parent(cur) {
         let name = doc.tag_name(parent);
@@ -576,6 +589,31 @@ mod tests {
             "10 years of Rust in production",
         ] {
             assert!(is_headline(real), "{real:?} was rejected");
+        }
+    }
+}
+
+#[cfg(test)]
+mod titular_tests {
+    use super::*;
+
+    /// The card-is-the-link pattern: `<a><h2>Title</h2><span>Read More</span></a>`.
+    /// It is the same relationship as `<h2><a>Title</a></h2>` with the nesting
+    /// inverted, and checking only upwards used to miss it -- silently, because
+    /// the page then harvested to nothing at all.
+    #[test]
+    fn an_anchor_wrapping_a_heading_is_titular() {
+        let html = "<html><body><div class=\"cards\">\
+            <div><a href=\"/a\"><h2>The first post about something</h2>\
+            <span>Read More</span></a></div>\
+            <div><a href=\"/b\"><h2>The second post about something</h2>\
+            <span>Read More</span></a></div></div></body></html>";
+        let doc = Doc::parse(html).unwrap();
+        let anchors: Vec<_> =
+            doc.preorder.iter().copied().filter(|&i| doc.tag_name(i) == "a").collect();
+        assert_eq!(anchors.len(), 2);
+        for a in anchors {
+            assert!(is_titular(&doc, a), "anchor wrapping a heading rejected");
         }
     }
 }

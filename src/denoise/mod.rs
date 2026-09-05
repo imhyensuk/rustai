@@ -30,7 +30,7 @@ pub const DROP_TAGS: &[&str] = &[
 /// Tags that are boilerplate by definition in the HTML5 outline.
 pub const CHROME_TAGS: &[&str] = &["nav", "footer", "aside", "menu"];
 
-/// Table machinery, exempt from the two prose-shaped heuristics.
+/// Elements exempt from the two prose-shaped heuristics.
 ///
 /// Link density and text-to-markup ratio both ask "does this container read
 /// like prose?", and a data table answers no however good it is: cells hold a
@@ -39,8 +39,18 @@ pub const CHROME_TAGS: &[&str] = &["nav", "footer", "aside", "menu"];
 /// for looking insufficiently like a paragraph. What a table is still gets
 /// decided -- by the vocabulary above, which catches an ad wherever it sits,
 /// and by the writer's own structural test for layout tables.
-const TABLE_TAGS: &[&str] =
-    &["table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col"];
+///
+/// Code blocks fail the same tests for the same reason, and a highlighted one
+/// fails them badly: `<span class="line"><span>` around every token, with the
+/// theme inlined as `style`.
+const TABLE_TAGS: &[&str] = &[
+    "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col",
+    // Code blocks answer those two questions the same way a table does. A
+    // syntax highlighter emits a `<span>` per token and a theme's worth of
+    // inline style, so the markup dwarfs the text; the text itself is source,
+    // which does not read like prose and never will.
+    "pre", "code", "samp", "kbd",
+];
 
 /// Class/id tokens that are never content, and that no positive marker
 /// outranks.

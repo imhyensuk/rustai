@@ -191,6 +191,11 @@ pub fn extract(html: &str, url: Option<&str>) -> Result<Article> {
 
 /// [`extract`] with explicit options.
 pub fn extract_with(html: &str, url: Option<&str>, opts: &ExtractOptions) -> Result<Article> {
+    // `tl` does not treat script and style bodies as raw text, so a `<` in a
+    // comparison opens a phantom element that swallows the document. Must
+    // happen before parsing; see `neutralise_raw_text`.
+    let html_owned = dom::neutralise_raw_text(html);
+    let html = html_owned.as_ref();
     let doc = dom::Doc::parse(html)?;
     let meta = meta::extract(&doc);
 
