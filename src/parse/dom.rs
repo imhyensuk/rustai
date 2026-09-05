@@ -80,6 +80,62 @@ pub(crate) fn neutralise_raw_text(html: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Neutralise markup that HTML says is not a tag, and `tl` treats as one.
+///
+/// After `<`, HTML opens an element only for an ASCII letter, an end tag for
+/// `/`, and a markup declaration for `!`. A `?` starts a *bogus comment* --
+/// consumed to the next `>` and discarded -- and every other byte is not
+/// markup at all: the `<` is literal text.
+///
+/// `tl` instead opens an element for any of them, and that element is never
+/// closed, so every following node nests inside it and the denoiser drops the
+/// lot. Twenty-seven punctuation bytes each cost the whole document. Two of
+/// them happen in the wild: MDN emits a bare `<?>` where its build tool
+/// dropped a template hole, losing every example on the page, and a
+/// misconfigured server leaking `<%= %>` or `<?php ?>` into its output loses
+/// the page entirely.
+///
+/// Bogus comments are deleted; everything else keeps its `<` as `&lt;`, which
+/// is what the byte means, and text extraction decodes it back.
+pub(crate) fn neutralise_bogus_markup(html: &str) -> Cow<'_, str> {
+    let bytes = html.as_bytes();
+    if find_bogus(bytes, 0).is_none() {
+        return Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+    while let Some(at) = find_bogus(bytes, cursor) {
+        out.push_str(&html[cursor..at]);
+        if bytes.get(at + 1) == Some(&b'?') {
+            // Bogus comment: runs to the next `>`, or to the end of input.
+            cursor = match memchr::memchr(b'>', &bytes[at..]) {
+                Some(end) => at + end + 1,
+                None => html.len(),
+            };
+        } else {
+            out.push_str("&lt;");
+            cursor = at + 1;
+        }
+    }
+    out.push_str(&html[cursor..]);
+    Cow::Owned(out)
+}
+
+/// Position of the next `<` that does not open a tag, end tag or declaration.
+fn find_bogus(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(offset) = memchr::memchr(b'<', &bytes[at..]) {
+        let i = at + offset;
+        match bytes.get(i + 1) {
+            Some(b) if b.is_ascii_alphabetic() || *b == b'!' || *b == b'/' => at = i + 1,
+            // A trailing `<` is literal, but escaping it gains nothing.
+            None => return None,
+            _ => return Some(i),
+        }
+    }
+    None
+}
+
 /// Position of `<name` at or after `from`, where the name is followed by a
 /// delimiter -- so `<style` matches but `<styles` does not.
 fn find_tag(bytes: &[u8], name: &str, from: usize) -> Option<usize> {
@@ -579,6 +635,48 @@ mod tests {
         assert_eq!(doc.parent(p), Some(article));
         let pos = |id: Id| doc.preorder.iter().position(|&x| x == id).unwrap();
         assert!(pos(article) < pos(p), "ancestors must precede descendants");
+    }
+}
+
+#[cfg(test)]
+mod bogus_markup_tests {
+    use super::neutralise_bogus_markup;
+    use std::borrow::Cow;
+
+    #[test]
+    fn a_bogus_comment_is_removed_not_left_open() {
+        // MDN emits this where its template dropped a hole.
+        assert_eq!(neutralise_bogus_markup("<p>a</p><?><p>b</p>"), "<p>a</p><p>b</p>");
+        assert_eq!(neutralise_bogus_markup("<div><?php echo $x; ?>t</div>"), "<div>t</div>");
+    }
+
+    #[test]
+    fn an_unterminated_bogus_comment_eats_only_itself() {
+        assert_eq!(neutralise_bogus_markup("<p>a</p><?php echo"), "<p>a</p>");
+    }
+
+    #[test]
+    fn punctuation_after_a_bracket_is_text_not_a_tag() {
+        assert_eq!(neutralise_bogus_markup("<div><%= name %></div>"), "<div>&lt;%= name %></div>");
+        assert_eq!(neutralise_bogus_markup("i <3 it"), "i &lt;3 it");
+        assert_eq!(neutralise_bogus_markup("a < b"), "a &lt; b");
+    }
+
+    #[test]
+    fn real_markup_is_untouched() {
+        for html in [
+            "<p class='x'>hi</p>",
+            "<!-- comment --><!doctype html><P>hi</P>",
+            "<![CDATA[x]]>",
+            "</div>",
+        ] {
+            assert!(matches!(neutralise_bogus_markup(html), Cow::Borrowed(_)), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_bracket_is_left_alone() {
+        assert!(matches!(neutralise_bogus_markup("text <"), Cow::Borrowed(_)));
     }
 }
 

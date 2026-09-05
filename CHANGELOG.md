@@ -42,6 +42,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A `<` followed by punctuation opened a phantom element, losing the rest of
+  the document.** After `<`, HTML opens an element only for a letter, an end
+  tag for `/` and a declaration for `!`; `?` starts a bogus comment, discarded
+  at the next `>`, and every other byte is not markup at all. `tl` opens an
+  element for any of them, and since that element is never closed, everything
+  after it nests inside and the denoiser drops the lot — twenty-seven
+  punctuation bytes each costing the whole page. Two occur in the wild: MDN
+  emits a bare `<?>` where its build tool left a template hole, and a
+  misconfigured server leaking `<%= %>` or `<?php ?>` loses the page entirely.
+  Bogus comments are now removed before parsing and every other `<` is escaped
+  to the character it means. MDN's `Promise` reference goes from 16,498
+  characters extracted to 27,975, taking its F1 from 66.6% to 86.0%; the
+  corpus mean rises 70.7% → 71.7% with precision and furniture unchanged.
 - **`tl` does not treat script bodies as raw text, so a comparison operator in
   minified JavaScript swallowed the page.** HTML says nothing inside `<script>`
   starts a tag until the end tag; `tl` opens one anyway, so `for(i=0;i<n;i++)`
