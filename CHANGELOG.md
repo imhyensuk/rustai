@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **crates.io publishing no longer uses a stored token.** The release job now
+  exchanges its GitHub OIDC identity for a crates.io token that lives for the
+  length of the job and is revoked by the action's post step, which is what the
+  PyPI job has always done. A token in repository secrets is a credential that
+  outlives the release it was needed for — this one was set to expire in three
+  months, which is a deadline to forget rather than a safeguard. Trusted
+  publishing needs a crate to already exist, so it could not have been used for
+  the first publish; 0.2.0 established the crate, so it can be used from here.
+
 ## [0.2.0] — 2026-09-06
 
 ### Added
