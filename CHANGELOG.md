@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`notebooks/colab_slm_chat.ipynb` — the library used the way it is meant to
+  be.** One Colab cell on a T4: it caches a 2–3B Korean-capable model to Google
+  Drive, loads it, and runs a grounded conversation where the context comes from
+  pages fetched moments earlier. Every question is answered twice by the same
+  model, with and without that context, because the fourth goal of this project
+  — that the output is useful to a small local model — had never been measured,
+  only asserted.
 - **`benches/fetch_corpus.py`, so the quality benchmark can actually be run.**
   `quality.py` scores real saved pages, and nothing in the repository fetched
   them — `corpus.py` is the synthetic generator for the throughput benchmark,

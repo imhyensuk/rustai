@@ -50,6 +50,14 @@ token budget checked at six sizes, a benchmark against `trafilatura`, and the
 whole pipeline down to a prompt. Installing is one `pip` line, so the notebook
 spends its length on the library rather than on a build.
 
+[`colab_slm_chat.ipynb`](notebooks/colab_slm_chat.ipynb) is the one that answers
+the question this library exists for: does any of it help a small model? One cell
+on a T4 — installs, caches a 2–3B Korean-capable model to Google Drive, loads it,
+and holds a conversation where every answer is grounded in pages fetched seconds
+earlier. Each question is answered twice by the same model, once from memory and
+once from retrieved context, because a retrieval library that is never compared
+against not retrieving is a library nobody has measured.
+
 [`colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb) walks the same
 ground more slowly, and [`colab_oneshot.ipynb`](notebooks/colab_oneshot.ipynb)
 is a single cell that installs and prints a report. Both predate the PyPI
