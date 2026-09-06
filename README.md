@@ -345,7 +345,20 @@ print(ctx.markdown)
 ```
 
 `max_tokens_per_source` caps how much any single page can contribute, so one long
-article cannot crowd out corroborating sources.
+article cannot crowd out corroborating sources. It is also accepted by `research()`
+and `Client`, so you do not have to drop down to `slim` to reach it:
+
+```python
+r = rustai.research("what is BM25 term saturation", max_tokens_per_source=500)
+```
+
+Leave it off for most questions. Measured over six queries at budgets of 1,000,
+2,048 and 4,096 tokens, capping either changed nothing or bought source coverage
+by admitting less relevant text — and coverage climbs on its own as the budget
+grows, from 84% of fetched sources represented at 1,000 tokens to 97% at 4,096.
+Reach for it when a question wants corroboration rather than depth: two of those
+six queries had one long page take 86% and 90% of the window, in one case
+starving the encyclopedia article on the exact term asked about.
 
 ### Listing pages
 

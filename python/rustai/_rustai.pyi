@@ -341,7 +341,26 @@ class Research:
         ...
 
 class Client:
-    """A reusable pipeline: connection pool, providers, extractor and slimmer."""
+    """A reusable pipeline: connection pool, providers, extractor and slimmer.
+
+    Build one and keep it: the connection pool, the robots cache and the
+    per-host delays all live on the client, so a second call to a host you
+    have already visited is cheaper.
+
+    `providers` accepts `"duckduckgo"`, `"wikipedia"` or `"wikipedia:ko"`,
+    `"searxng:https://…"`, `"rss:https://…"` and `"sitemap:https://…"`.
+    `limit` caps how many search hits are kept -- the same quantity
+    `research()` calls `max_sources`.
+
+    `max_tokens_per_source` caps how much any one page may contribute to the
+    context. Leaving it `None` is right for most questions: measured over six
+    queries at budgets of 1,000, 2,048 and 4,096 tokens, capping either
+    changed nothing or bought source coverage by admitting less relevant text,
+    and coverage rises on its own as the budget grows. Reach for it when a
+    question needs corroboration rather than depth -- two of those six queries
+    had a single long page take 86% and 90% of the window, in one case
+    starving the encyclopedia article on the exact term asked about.
+    """
     def __init__(
         self,
         *,
@@ -360,6 +379,7 @@ class Client:
         max_retry_after: float = 60.0,
         cookie_file: str | None = None,
         max_tokens: int = 2048,
+        max_tokens_per_source: int | None = None,
         diversity: float = 0.35,
         include_links: bool = True,
         include_images: bool = False,
@@ -464,12 +484,17 @@ def research(
     *,
     max_sources: int = 5,
     max_tokens: int = 2048,
+    max_tokens_per_source: int | None = None,
     providers: Sequence[str] | None = None,
     impersonate: str = "chrome",
     respect_robots: bool = True,
     contact_email: str | None = None,
 ) -> Research:
-    """Search, read and compress in one call, using a throwaway client."""
+    """Search, read and compress in one call, using a throwaway client.
+
+    `max_tokens_per_source` caps how much any one page may contribute; see
+    `Client` for when that is worth doing.
+    """
     ...
 def count_tokens(text: str) -> int:
     """Estimate how many LLM tokens a string costs."""

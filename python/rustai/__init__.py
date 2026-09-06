@@ -40,6 +40,11 @@ Some questions are answered by a conversation rather than a paper::
 
     client = rustai.Client(providers=["hackernews", "stackexchange", "github"])
 
+When a question wants corroboration rather than depth, stop any one page from
+taking the whole window::
+
+    r = rustai.research("what is BM25 term saturation", max_tokens_per_source=500)
+
 Everything blocking releases the GIL, so these calls parallelise across threads.
 """
 

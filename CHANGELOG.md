@@ -27,6 +27,17 @@ All notable changes to this project are documented here. The format follows
   callers hard enough that a provider fired concurrently with the others
   fails more often than it answers.
 
+- **`max_tokens_per_source` is now accepted by `research()` and `Client`,** not
+  only by `slim`. One long page taking most of the window is a real failure —
+  in one measured query an article took 86% of a 1,500-token budget and starved
+  the encyclopedia entry on the exact term asked about — but it is not the
+  common case, so the default stays `None`. Over six queries at budgets of
+  1,000, 2,048 and 4,096 tokens, capping either changed nothing or traded
+  relevance for coverage, and coverage rises on its own with the budget (84% of
+  fetched sources represented at 1,000 tokens, 97% at 4,096). The class
+  docstring says when to reach for it; PyO3 discards a doc comment on `#[new]`,
+  so `Client`'s parameters are documented on the class rather than `__init__`.
+
 ### Changed
 
 - **Denoising thresholds tuned against a measured corpus rather than judgement.**

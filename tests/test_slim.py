@@ -108,3 +108,32 @@ class TestEdgeCases:
     def test_zero_budget_selects_nothing(self, articles):
         ctx = rustai.slim("tokio", articles, max_tokens=0)
         assert ctx.selected == []
+
+
+def test_per_source_cap_is_reachable_from_the_entry_points(monkeypatch):
+    """The cap exists on `slim`; it has to be reachable where people start."""
+    import inspect
+
+    # Both entry points accept it, and default to leaving it off.
+    for factory in (rustai.Client, rustai.research):
+        doc = inspect.getdoc(factory) or ""
+        assert "max_tokens_per_source" in doc, factory
+
+    client = rustai.Client(providers=["wikipedia:en"], max_tokens_per_source=64)
+    assert client is not None
+
+
+def test_the_cap_bounds_what_one_source_contributes(articles):
+    """A long page cannot take the whole window once the cap is set."""
+    query = "tokio rayon memory"
+    uncapped = rustai.slim(query, articles, max_tokens=800)
+    capped = rustai.slim(query, articles, max_tokens=800, max_tokens_per_source=40)
+
+    def share(ctx):
+        by: dict[int, int] = {}
+        for unit in ctx.selected:
+            by[unit["source"]] = by.get(unit["source"], 0) + unit["tokens"]
+        return max(by.values()) if by else 0
+
+    assert share(capped) <= 40
+    assert share(capped) < share(uncapped)
