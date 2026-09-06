@@ -122,10 +122,29 @@ client = rustai.Client(
     timeout=25.0,
 )
 
+LOOKUP = ("날씨", "기온", "미세먼지", "주가", "환율", "시세", "순위", "실시간",
+          "지금", "현재", "오늘", "며칠", "몇 시")
+
+# 실시간 수치용: 백과사전 없이.
+live_client = rustai.Client(
+    providers=[p for p in PROVIDERS if not p.startswith("wikipedia")],
+    limit=MAX_RESULTS,
+    max_tokens=CONTEXT_TOKENS,
+    max_tokens_per_source=PER_SOURCE_CAP,
+    contact_email=CONTACT_EMAIL,
+    timeout=25.0,
+)
+
 def gather(question: str):
     """검색 → 읽기 → 정제 → 압축. 번호가 매겨진 근거와 계측치를 돌려줍니다."""
+    # 백과사전은 "무엇인가"에 강하고 "지금 얼마인가"에 무력합니다. 그런데 그
+    # 문서들은 길고 깨끗한 산문이라 슬리머의 예산을 독차지합니다 -- 측정해 보면
+    # 날씨 사이트는 JS 로 그려져 36토큰을 내놓고, 엉뚱하게 걸려든 인물 문서는
+    # 6,044토큰을 내놓습니다. 실시간 수치를 묻는 질문에서는 빼는 편이 낫습니다.
+    lookup = any(k in question for k in LOOKUP)
+    pipe = live_client if lookup else client
     t0 = time.time()
-    res = client.research(question, max_sources=MAX_SOURCES)
+    res = pipe.research(question, max_sources=MAX_SOURCES)
     elapsed = time.time() - t0
 
     # context.selected 는 인덱스를 담습니다: source→articles, unit→그 글의 units.
@@ -146,7 +165,8 @@ def gather(question: str):
         blocks.append(f"[{n}] {meta['title']}\n{body}")
         cites.append((n, meta["title"], meta["url"], meta["tokens"], rel))
 
-    context = "\n\n".join(blocks)
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    context = f"(수집 시각: {stamp})\n\n" + "\n\n".join(blocks)
     return {
         "context": context,
         "cites": cites,
@@ -158,6 +178,7 @@ def gather(question: str):
         "hits": len(res.results),
         "read": len(res.articles),
         "failures": res.failures,
+        "lookup": lookup,
     }
 
 # ------------------------------------------------------------- 5. 생성
@@ -165,16 +186,16 @@ import datetime
 TODAY = datetime.date.today().isoformat()
 
 GROUNDED = (
-    f"오늘은 {TODAY} 입니다.\n"
-    "당신은 웹에서 수집한 근거만으로 답하는 한국어 조사 도우미입니다.\n"
-    "규칙:\n"
-    "1. 근거에 있는 내용만 말하세요. 근거에 없으면 '수집된 자료에는 없습니다'라고 하세요.\n"
-    "2. 사실을 진술한 문장 끝마다 [1], [2] 형식으로 출처 번호를 다세요.\n"
-    "3. 추측하지 말고, 근거끼리 어긋나면 어긋난다고 밝히세요.\n"
-    "4. 날씨·시세·순위처럼 시간이 지나면 달라지는 값은, 근거에 시점이 적혀\n"
-    "   있지 않으면 '수집 시점 기준'이라고 밝히세요.\n"
-    "5. 한국어로, 간결하게 답하세요."
+    f"오늘은 {TODAY} 입니다. 아래 근거는 방금 웹에서 수집한 것입니다.\n"
+    "당신은 근거를 바탕으로 한국어로 답하는 조사 도우미입니다.\n"
+    "- 근거에 있는 내용으로 답하고, 사실 문장 끝에 [1] 처럼 출처 번호를 다세요.\n"
+    "- 근거가 질문과 무관하면 무관하다고 한 문장으로 말하세요.\n"
+    "- 추측하지 마세요."
 )
+# 규칙은 셋입니다. 다섯이었을 때 이 크기의 모델은 답 대신 규칙을 따라 읽었고,
+# "부산의 날씨는?"에 "부산의 날씨는 수집 시점 기준입니다."라고 답했습니다.
+# 수집 시각을 덧붙이는 일은 모델이 아니라 코드가 합니다 -- 아래 gather() 참고.
+
 PLAIN = "당신은 한국어로 답하는 도우미입니다. 아는 대로 간결하게 답하세요."
 
 @torch.inference_mode()
@@ -237,7 +258,8 @@ while True:
         print(f"  수집 실패: {type(e).__name__}: {e}"); continue
 
     print(f"  히트 {g['hits']}개 → {g['read']}개 읽음 → "
-          f"{g['considered']}개 블록 중 {g['tokens']}토큰 선별 · {g['seconds']:.1f}초")
+          f"{g['considered']}개 블록 중 {g['tokens']}토큰 선별 · {g['seconds']:.1f}초"
+          + ("  [실시간 질문 — 백과사전 제외]" if g["lookup"] else ""))
     if g["failures"]:
         for stage, msg in g["failures"][:3]:
             print(f"  · 건너뜀 {stage}: {msg[:60]}")
