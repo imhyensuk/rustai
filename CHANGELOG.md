@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   model, with and without that context, because the fourth goal of this project
   — that the output is useful to a small local model — had never been measured,
   only asserted.
+- **`Context.selected` now says its scores are not comparable across queries.**
+  They rank units within one query; BM25 scales with how rare the query's terms
+  are. On two live queries an off-topic encyclopedia article scored 0.22 while
+  every correct source on the other scored below 0.10, so a fixed cutoff drops
+  the good set and keeps the bad one. The field invited exactly that mistake by
+  not saying so.
 - **`benches/fetch_corpus.py`, so the quality benchmark can actually be run.**
   `quality.py` scores real saved pages, and nothing in the repository fetched
   them — `corpus.py` is the synthetic generator for the throughput benchmark,

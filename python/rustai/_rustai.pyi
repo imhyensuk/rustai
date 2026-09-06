@@ -294,6 +294,15 @@ class Context:
         the query), `density` (nouns and numbers over filler) and the combined
         `score`. Enough to answer "why is this in my context window and that
         paragraph is not".
+
+        These scores rank units *within one query* and are not comparable
+        across queries: BM25 scales with how rare the query's terms are, so a
+        common-word question produces small numbers for good matches and a
+        rare-word question large ones for mediocre matches. Measured on two
+        live queries, an off-topic encyclopedia article scored 0.22 on one
+        while every correct source on the other scored below 0.10 -- so a fixed
+        cutoff drops the good set and keeps the bad one. Sort by them, show
+        them, but do not threshold on them.
         """
         ...
     @property
