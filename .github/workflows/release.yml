@@ -124,7 +124,11 @@ jobs:
     name: publish to crates.io
     needs: [version]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A tag publishes. A manual dispatch rehearses the handshake and stops
+    # short of uploading, because the alternative is finding out that the trust
+    # configuration is wrong at the last job of a real release, after every
+    # wheel has been built -- which is how the previous two attempts failed.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     environment: crates-io
     permissions:
       # Trusted publishing, the same shape as the PyPI job above: crates.io
@@ -139,4 +143,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - run: cargo publish --token ${{ steps.auth.outputs.token }}
+      # The action fails outright on a rejected handshake, but an empty token
+      # would otherwise reach `cargo publish` as a plain authentication error,
+      # which reads like a bad credential rather than a trust misconfiguration.
+      - name: crates.io issued a token
+        env:
+          TOKEN: ${{ steps.auth.outputs.token }}
+        run: test -n "$TOKEN" && echo "trusted publishing handshake succeeded"
+      - name: publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cargo publish --token ${{ steps.auth.outputs.token }}
+      - name: rehearse the publish without uploading
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo publish --dry-run --token ${{ steps.auth.outputs.token }}

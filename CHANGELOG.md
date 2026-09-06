@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows
   publishing needs a crate to already exist, so it could not have been used for
   the first publish; 0.2.0 established the crate, so it can be used from here.
 
+  A manual dispatch now rehearses the handshake and stops before uploading, so
+  a wrong trust configuration surfaces in two minutes rather than at the last
+  job of a real release, after every wheel has been built. That is how both
+  previous crates.io attempts failed.
+
 ## [0.2.0] — 2026-09-06
 
 ### Added
