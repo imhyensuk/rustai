@@ -113,7 +113,9 @@ print(f"  로드 완료 · {time.time() - t0:.0f}초 · "
 # --------------------------------------------------- 4. rustai 파이프라인
 client = rustai.Client(
     providers=PROVIDERS,
-    max_results=MAX_RESULTS,      # 검색 폭
+    # 검색 폭. PyPI 0.2.0 의 이름은 `limit` 이고, 다음 릴리스에서 `max_results`
+    # 로 바뀌면서도 계속 받습니다 -- 두 버전에서 다 도는 쪽을 씁니다.
+    limit=MAX_RESULTS,
     max_tokens=CONTEXT_TOKENS,
     max_tokens_per_source=PER_SOURCE_CAP,
     contact_email=CONTACT_EMAIL,
