@@ -49,10 +49,25 @@ pytest --network
 
 ## Benchmarks
 
+Throughput, against a synthetic corpus so the numbers are deterministic:
+
 ```bash
 python benches/corpus.py /tmp/rustai-corpus
 cargo run --release --example bench -- /tmp/rustai-corpus
 python benches/benchmark.py
 ```
 
-If a change moves those numbers, say so in the pull request.
+Extraction quality, against real pages, because a corpus this repository wrote
+cannot tell you whether the denoiser survives the open web:
+
+```bash
+python benches/fetch_corpus.py /tmp/rustai-pages
+python benches/quality.py      /tmp/rustai-pages
+```
+
+Quality is scored two ways at once — shingle overlap with each page's own
+article container, and a count of site furniture that reached the output.
+Overlap alone says to switch every threshold off, because the container being
+compared against never held the navigation. Read both numbers or neither.
+
+If a change moves any of them, say so in the pull request.

@@ -349,8 +349,18 @@ class Client:
 
     `providers` accepts `"duckduckgo"`, `"wikipedia"` or `"wikipedia:ko"`,
     `"searxng:https://…"`, `"rss:https://…"` and `"sitemap:https://…"`.
-    `limit` caps how many search hits are kept -- the same quantity
-    `research()` calls `max_sources`.
+
+    Two separate caps decide how much work a question costs, and they are
+    easy to mistake for each other:
+
+    * `max_results` (this constructor) is search breadth -- how many fused
+      hits `search` returns. Fetching nothing, it is cheap to raise.
+    * `max_sources` (`research`) is read depth -- how many of those hits are
+      actually fetched and extracted. This is what costs time.
+
+    So `Client(max_results=20).research(q, max_sources=5)` casts a wide net
+    and reads the best five of it. `max_results` was called `limit` in 0.2.0
+    and that name still works.
 
     `max_tokens_per_source` caps how much any one page may contribute to the
     context. Leaving it `None` is right for most questions: measured over six
@@ -385,7 +395,8 @@ class Client:
         include_images: bool = False,
         include_tables: bool = True,
         index_mode: IndexMode = "auto",
-        limit: int = 10,
+        max_results: int | None = None,
+        limit: int | None = None,
     ) -> None:
         """Initialize self.  See help(type(self)) for accurate signature."""
         ...

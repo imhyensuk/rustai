@@ -17,8 +17,12 @@ container, which never held the navigation, so a threshold that lets the
 whole page through scores *better* on overlap while being obviously
 worse. Tuning on overlap alone lands on switching every threshold off.
 
-    python3 benches/corpus.py /tmp/pages          # fetch a corpus first
-    python3 benches/quality.py /tmp/pages
+    python3 benches/fetch_corpus.py /tmp/rustai-pages
+    python3 benches/quality.py      /tmp/rustai-pages
+
+`corpus.py` is a different thing -- a synthetic generator for the throughput
+benchmark, where determinism matters more than realism. Extraction quality
+cannot be measured against pages this repository wrote.
 """
 
 import json
@@ -88,7 +92,10 @@ def main() -> None:
         furniture += sum(1 for f in FURNITURE if f.lower() in got.lower())
 
     if not rows:
-        sys.exit(f"no scoreable pages in {directory}")
+        sys.exit(
+            f"no scoreable pages in {directory}\n"
+            f"Fetch the corpus first: python3 benches/fetch_corpus.py {directory}"
+        )
 
     rows.sort(key=lambda r: r[3])
     print(f"{'page':22} {'recall':>8} {'precision':>10} {'F1':>7}")

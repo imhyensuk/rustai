@@ -180,3 +180,30 @@ class TestExceptions:
     def test_public_api_is_exported(self):
         assert set(rustai.__all__) <= set(dir(rustai))
         assert rustai.__version__
+
+
+class TestSearchAndReadCapsAreDistinct:
+    """`max_results` is search breadth; `max_sources` is read depth.
+
+    They are one letter apart in spirit and easy to conflate -- the old name
+    for the first was `limit`, which said nothing about what it limited.
+    """
+
+    def test_max_results_is_the_current_name(self):
+        assert rustai.Client(providers=["wikipedia:en"], max_results=3) is not None
+
+    def test_limit_is_still_accepted(self):
+        """It shipped in 0.2.0; renaming it must not break callers."""
+        assert rustai.Client(providers=["wikipedia:en"], limit=3) is not None
+
+    def test_agreeing_duplicates_are_fine(self):
+        assert rustai.Client(providers=["wikipedia:en"], max_results=4, limit=4) is not None
+
+    def test_disagreeing_duplicates_are_refused(self):
+        with pytest.raises(ValueError, match="old name"):
+            rustai.Client(providers=["wikipedia:en"], max_results=3, limit=9)
+
+    def test_the_docstring_keeps_the_two_apart(self):
+        doc = rustai.Client.__doc__ or ""
+        assert "max_results" in doc and "max_sources" in doc
+        assert "breadth" in doc and "depth" in doc

@@ -495,6 +495,20 @@ like real ones: heavy chrome, nested wrappers, ad slots, a sidebar, a script
 blob. Synthetic so the benchmark is deterministic and redistributable — the
 chrome-to-content ratio is what an extractor is tested on, not raw size.
 
+Extraction *quality* needs the opposite corpus — real pages, since synthetic
+ones only contain the mess this repository thought to write:
+
+```bash
+python benches/fetch_corpus.py /tmp/rustai-pages
+python benches/quality.py      /tmp/rustai-pages
+```
+
+The page list is checked in; the pages themselves are fetched, being other
+people's copyright and worth re-reading as the sites change. Over 20 scoreable
+pages: recall 65.0%, precision 84.0%, F1 71.7%, with 3 pieces of site furniture
+leaking. Both numbers matter — judged on overlap alone the best setting is to
+switch every threshold off, which quadruples the furniture.
+
 **Rust alone**, streaming one document at a time (Apple M1, macOS 26.6, release
 build):
 

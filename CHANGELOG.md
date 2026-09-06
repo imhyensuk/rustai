@@ -6,8 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`benches/fetch_corpus.py`, so the quality benchmark can actually be run.**
+  `quality.py` scores real saved pages, and nothing in the repository fetched
+  them — `corpus.py` is the synthetic generator for the throughput benchmark,
+  which the docstring pointed at by mistake. The page list is checked in and
+  the pages are not: they are other people's copyright, and a frozen copy would
+  rot against the live sites the extractor has to survive. An empty directory
+  now names the fetcher instead of reporting "no scoreable pages".
+
 ### Changed
 
+- **`Client`'s `limit` is now `max_results`, which says what it caps.** The
+  constructor sat next to `research(max_sources=…)` and the two look like one
+  quantity under two names. They are not: `max_results` is search breadth, how
+  many fused hits `search` returns, and `max_sources` is read depth, how many
+  of those are fetched and extracted. `Client(max_results=20).research(q,
+  max_sources=5)` casts a wide net and reads the best five. `limit` is still
+  accepted; passing both with different values is an error rather than a
+  silent winner.
 - **crates.io publishing no longer uses a stored token.** The release job now
   exchanges its GitHub OIDC identity for a crates.io token that lives for the
   length of the job and is revoked by the action's post step, which is what the

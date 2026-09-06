@@ -630,8 +630,18 @@ impl PyResearch {
 ///
 /// `providers` accepts `"duckduckgo"`, `"wikipedia"` or `"wikipedia:ko"`,
 /// `"searxng:https://…"`, `"rss:https://…"` and `"sitemap:https://…"`.
-/// `limit` caps how many search hits are kept -- the same quantity
-/// `research()` calls `max_sources`.
+///
+/// Two separate caps decide how much work a question costs, and they are
+/// easy to mistake for each other:
+///
+/// * `max_results` (this constructor) is search breadth -- how many fused
+///   hits `search` returns. Fetching nothing, it is cheap to raise.
+/// * `max_sources` (`research`) is read depth -- how many of those hits are
+///   actually fetched and extracted. This is what costs time.
+///
+/// So `Client(max_results=20).research(q, max_sources=5)` casts a wide net
+/// and reads the best five of it. `max_results` was called `limit` in 0.2.0
+/// and that name still works.
 ///
 /// `max_tokens_per_source` caps how much any one page may contribute to the
 /// context. Leaving it `None` is right for most questions: measured over six
@@ -674,7 +684,8 @@ impl PyClient {
         include_images = false,
         include_tables = true,
         index_mode = "auto",
-        limit = 10,
+        max_results = None,
+        limit = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -699,7 +710,8 @@ impl PyClient {
         include_images: bool,
         include_tables: bool,
         index_mode: &str,
-        limit: usize,
+        max_results: Option<usize>,
+        limit: Option<usize>,
     ) -> PyResult<Self> {
         if !timeout.is_finite() || timeout <= 0.0 {
             return Err(PyValueError::new_err("timeout must be a positive number of seconds"));
@@ -707,6 +719,22 @@ impl PyClient {
         if !(0.0..=1.0).contains(&diversity) {
             return Err(PyValueError::new_err("diversity must be between 0.0 and 1.0"));
         }
+
+        // `limit` was this parameter's name in 0.2.0 and stays accepted. It is
+        // a bad name: it does not say what it limits, and the neighbouring
+        // `max_sources` limits something else -- this caps how many hits
+        // `search` returns, `max_sources` caps how many of them `research`
+        // then fetches. Naming it after what it caps keeps the two apart.
+        let max_results = match (max_results, limit) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(PyValueError::new_err(format!(
+                    "max_results={a} and limit={b} disagree; limit is the old name \
+                     for max_results, so pass only max_results"
+                )));
+            }
+            (Some(n), _) | (None, Some(n)) => n,
+            (None, None) => 10,
+        };
 
         let providers = match providers {
             Some(specs) => {
@@ -742,7 +770,12 @@ impl PyClient {
 
         let pipeline = Pipeline::builder()
             .fetch(fetch)
-            .search(SearchConfig { providers, limit, per_provider: limit.max(10), contact_email })
+            .search(SearchConfig {
+                providers,
+                limit: max_results,
+                per_provider: max_results.max(10),
+                contact_email,
+            })
             .extract(ExtractOptions {
                 render: RenderOptions { include_links, include_images, include_tables },
                 denoise: DenoiseConfig { keep_tables: include_tables, ..Default::default() },
@@ -1034,7 +1067,8 @@ fn research(
         false,
         true,
         "auto",
-        10,
+        None,
+        None,
     )?;
     client.research(py, query, max_sources)
 }
