@@ -1100,29 +1100,106 @@ fn extract_many(
 }
 
 /// Rank and compress already-extracted articles into a context window.
+///
+/// Pass `query_vector` and `unit_vectors` to blend an embedding model's
+/// judgement into the ranking. BM25 cannot see that "딥러닝" and "deep
+/// learning" name the same subject, or that a paragraph explains a term
+/// without using it; a model you already run can, and the arithmetic then
+/// happens across every core with the GIL released:
+///
+/// ```text
+/// units = [u.text for a in articles for u in a.units]
+/// ctx = rustai.slim(
+///     query, articles,
+///     query_vector=model.encode(query).tolist(),
+///     unit_vectors=model.encode(units).tolist(),
+///     semantic_weight=0.5,          # 0 is pure BM25, 1 is pure vector
+/// )
+/// ```
+///
+/// One vector per unit, flattened in that exact order — short units are
+/// dropped before scoring, so the alignment is against every unit rather than
+/// the surviving ones, and a wrong-sized list is refused rather than quietly
+/// mis-ranked. Vectors need not be normalised.
+///
+/// Diversity still uses word overlap rather than vector distance. The
+/// duplicate threshold is calibrated against overlap, and two paragraphs of
+/// one article routinely exceed 0.8 cosine under a sentence transformer, so
+/// swapping the measure without recalibrating would start discarding the
+/// second half of every source.
 #[pyfunction]
-#[pyo3(signature = (query, articles, *, max_tokens = 2048, diversity = 0.35, max_tokens_per_source = None, include_breadcrumbs = true))]
+#[pyo3(signature = (query, articles, *, max_tokens = 2048, diversity = 0.35,
+    max_tokens_per_source = None, include_breadcrumbs = true,
+    query_vector = None, unit_vectors = None, semantic_weight = 0.5))]
+#[allow(clippy::too_many_arguments)]
 fn slim(
     py: Python<'_>,
     query: &str,
-    articles: Vec<PyArticle>,
+    articles: Vec<PyRef<'_, PyArticle>>,
     max_tokens: usize,
     diversity: f32,
     max_tokens_per_source: Option<usize>,
     include_breadcrumbs: bool,
+    query_vector: Option<Vec<f32>>,
+    unit_vectors: Option<Vec<Vec<f32>>>,
+    semantic_weight: f32,
 ) -> PyResult<PyContext> {
     if !(0.0..=1.0).contains(&diversity) {
         return Err(PyValueError::new_err("diversity must be between 0.0 and 1.0"));
     }
+    if !(0.0..=1.0).contains(&semantic_weight) {
+        return Err(PyValueError::new_err("semantic_weight must be between 0.0 and 1.0"));
+    }
+    let owned: Vec<Article> = articles.into_iter().map(|a| a.inner.clone()).collect();
+
+    // Both or neither: one without the other is a silent no-op, and the caller
+    // would see ranking that quietly ignored the model they just ran.
+    let vectors = match (&query_vector, &unit_vectors) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(PyValueError::new_err(
+                "query_vector and unit_vectors go together; pass both or neither",
+            ));
+        }
+        (None, None) => None,
+        (Some(q), Some(units)) => {
+            let expected: usize = owned.iter().map(|a| a.units.len()).sum();
+            if units.len() != expected {
+                return Err(PyValueError::new_err(format!(
+                    "unit_vectors has {} entries but the articles hold {expected} units. \
+                     One vector per unit, flattened in order: \
+                     [u.text for a in articles for u in a.units]",
+                    units.len()
+                )));
+            }
+            if let Some((i, bad)) = units.iter().enumerate().find(|(_, u)| u.len() != q.len()) {
+                return Err(PyValueError::new_err(format!(
+                    "unit_vectors[{i}] has {} dimensions and query_vector has {}. \
+                     Embed the query with the same model as the units",
+                    bad.len(),
+                    q.len()
+                )));
+            }
+            Some((q.as_slice(), units.as_slice()))
+        }
+    };
+
     let cfg = SlimConfig {
         max_tokens,
         diversity,
         max_tokens_per_source,
         include_breadcrumbs,
+        semantic_weight,
         ..Default::default()
     };
-    let owned: Vec<Article> = articles.into_iter().map(|a| a.inner).collect();
-    let inner = py.detach(|| crate::rank::slim(query, &owned, &cfg));
+    let inner = py.detach(|| match vectors {
+        Some((q, units)) => crate::rank::slim_with_vectors(
+            query,
+            &owned,
+            &cfg,
+            Some(crate::rank::Vectors { query: q, units }),
+        ),
+        None => crate::rank::slim(query, &owned, &cfg),
+    });
     Ok(PyContext { inner })
 }
 

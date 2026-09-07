@@ -37,6 +37,17 @@ a unit is one paragraph and a third of them are under 30 tokens::
 
     chunks = rustai.chunk_many(articles)      # parallel across every core
 
+Bring your own embedding model and it ranks alongside BM25 -- this library
+does not bundle one, and the arithmetic runs across every core::
+
+    units = [u.text for a in articles for u in a.units]
+    ctx = rustai.slim(
+        query, articles,
+        query_vector=model.encode(query).tolist(),
+        unit_vectors=model.encode(units).tolist(),
+        semantic_weight=0.5,          # 0 is pure BM25, 1 is pure vector
+    )
+
 Scholarly sources are first-class alongside web search::
 
     client = rustai.Client(

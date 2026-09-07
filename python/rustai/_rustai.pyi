@@ -538,8 +538,39 @@ def slim(
     diversity: float = 0.35,
     max_tokens_per_source: int | None = None,
     include_breadcrumbs: bool = True,
+    query_vector: Sequence[float] | None = None,
+    unit_vectors: Sequence[Sequence[float]] | None = None,
+    semantic_weight: float = 0.5,
 ) -> Context:
-    """Rank and compress already-extracted articles into a context window."""
+    """Rank and compress already-extracted articles into a context window.
+
+    Pass `query_vector` and `unit_vectors` to blend an embedding model's
+    judgement into the ranking. BM25 cannot see that "딥러닝" and "deep
+    learning" name the same subject, or that a paragraph explains a term
+    without using it; a model you already run can, and the arithmetic then
+    happens across every core with the GIL released:
+
+    ```text
+    units = [u.text for a in articles for u in a.units]
+    ctx = rustai.slim(
+        query, articles,
+        query_vector=model.encode(query).tolist(),
+        unit_vectors=model.encode(units).tolist(),
+        semantic_weight=0.5,          # 0 is pure BM25, 1 is pure vector
+    )
+    ```
+
+    One vector per unit, flattened in that exact order — short units are
+    dropped before scoring, so the alignment is against every unit rather than
+    the surviving ones, and a wrong-sized list is refused rather than quietly
+    mis-ranked. Vectors need not be normalised.
+
+    Diversity still uses word overlap rather than vector distance. The
+    duplicate threshold is calibrated against overlap, and two paragraphs of
+    one article routinely exceed 0.8 cosine under a sentence transformer, so
+    swapping the measure without recalibrating would start discarding the
+    second half of every source.
+    """
     ...
 def research(
     query: str,

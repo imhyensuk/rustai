@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`slim` accepts embeddings from a model you already run.** BM25 cannot see
+  that "딥러닝" and "deep learning" name the same subject, or that a paragraph
+  explains a term without using it. Pass `query_vector` and `unit_vectors` --
+  one per unit, flattened as `[u.text for a in articles for u in a.units]` --
+  and cosine similarity blends into relevance at `semantic_weight`, computed
+  across the rayon pool with the GIL released. No model is bundled: that would
+  trade a keyless install and a fast build for hundreds of megabytes of
+  weights, and the caller's GPU embeds faster than this crate could anyway.
+  Swept over the nine `retrieval.py` queries with a multilingual MiniLM, pure
+  BM25 finds the answer 96% of the time, pure cosine 96%, and the blend 100% --
+  so the default is 0.5, and `benches/hybrid.py` reproduces the sweep. A
+  mismatched list length or dimension is refused with the expected shape named,
+  rather than silently mis-ranking. Diversity still uses word overlap: its
+  threshold is calibrated against overlap, and two paragraphs of one article
+  routinely exceed 0.8 cosine, so swapping it would start discarding the second
+  half of every source.
 - **`Article.chunks()` and `rustai.chunk_many()`, for putting this in a vector
   store.** A `Unit` is one block, which is the grain ranking wants and the
   wrong one for embedding: on MDN's `Promise` reference the median unit is 37

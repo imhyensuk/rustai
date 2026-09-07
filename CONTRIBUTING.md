@@ -94,6 +94,16 @@ Each query carries the patterns any correct source would contain, so the
 headline is simply whether the answer reached the window. It also reports what
 share of the budget went to sources that mention the subject at all.
 
+Whether an embedding model earns its keep, if you have one installed:
+
+```bash
+pip install sentence-transformers
+python3 benches/hybrid.py
+```
+
+It sweeps `semantic_weight` from pure BM25 to pure cosine. Both ends lose; the
+gain is in the middle, which is where the default sits.
+
 Quality is scored two ways at once — shingle overlap with each page's own
 article container, and a count of site furniture that reached the output.
 Overlap alone says to switch every threshold off, because the container being

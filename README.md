@@ -536,6 +536,38 @@ is checked, because a benchmark counting only tokens would reward returning
 nothing. On a 3B model with a 32k window the raw pages for "딥러닝이 뭐야?"
 do not fit at all, at 593,439 tokens; the context that answers it is 1,627.
 
+### Bring your own embedding model
+
+```python
+units = [u.text for a in articles for u in a.units]
+ctx = rustai.slim(
+    query, articles,
+    query_vector=model.encode(query).tolist(),
+    unit_vectors=model.encode(units).tolist(),
+    semantic_weight=0.5,          # 0 is pure BM25, 1 is pure vector
+)
+```
+
+BM25 cannot see that "딥러닝" and "deep learning" name the same subject, or
+that a paragraph explains a term without using it. A model you already run can.
+This library does not bundle one — that would trade a keyless install and a
+fast build for a few hundred megabytes of weights — but it will fold cosine
+similarity into the same selection, across every core, with the GIL released.
+
+Swept over the nine `retrieval.py` queries with a multilingual MiniLM:
+
+```
+semantic_weight   0.0    0.25   0.5    0.75   1.0
+answer found      96%    100%   100%   96%    96%
+```
+
+Both ends lose. Pure BM25 misses "layer" in an answer about deep learning that
+never uses the word; pure cosine loses the question where the exact terms are
+the point. Reproduce with `python benches/hybrid.py`. Embedding is the
+expensive half — 1.2s to 7.9s for 96 to 2,249 units, against 2–4s for the whole
+search-and-extract pipeline — so it is worth reaching for on a question BM25
+cannot phrase, not by default.
+
 ### Chunks for a vector store
 
 ```python

@@ -33,6 +33,9 @@ pub struct SlimConfig {
     pub max_tokens: usize,
     /// Weight of BM25 relevance in the combined score.
     pub relevance_weight: f32,
+    /// How much of relevance comes from supplied vectors rather than BM25,
+    /// in `[0, 1]`. Ignored when no vectors are given.
+    pub semantic_weight: f32,
     /// Weight of information density.
     pub density_weight: f32,
     /// Weight of the "earlier in the document" prior.
@@ -60,6 +63,7 @@ impl Default for SlimConfig {
         SlimConfig {
             max_tokens: 2048,
             relevance_weight: 0.60,
+            semantic_weight: 0.5,
             density_weight: 0.25,
             position_weight: 0.15,
             diversity: 0.35,
@@ -142,7 +146,42 @@ struct Candidate<'a> {
 ///
 /// An empty query is legal and means "summarise": relevance drops out and the
 /// selection is driven by density and position alone.
+/// Embeddings supplied by the caller, for hybrid ranking.
+///
+/// BM25 cannot see that "딥러닝" and "deep learning" are the same subject, or
+/// that a paragraph explains a term without naming it. An embedding model can,
+/// and the caller already has one; what this crate can add is doing the
+/// arithmetic across the rayon pool and folding it into the same selection.
+///
+/// `units` holds one vector per unit of every article, flattened in order --
+/// exactly `[u for a in articles for u in a.units]`. Short units are filtered
+/// out before scoring, so the alignment is against *all* units rather than the
+/// ones that survive; indices are mapped internally.
+pub struct Vectors<'a> {
+    /// The query, embedded by the same model as the units.
+    pub query: &'a [f32],
+    /// One per unit, flattened over articles in order.
+    pub units: &'a [Vec<f32>],
+}
+
+/// Rank and compress, using BM25 alone.
 pub fn slim(query: &str, articles: &[Article], cfg: &SlimConfig) -> Context {
+    slim_with_vectors(query, articles, cfg, None)
+}
+
+/// [`slim`], with caller-supplied embeddings blended into relevance.
+///
+/// Diversity still uses token overlap rather than vector distance. The
+/// duplicate threshold is calibrated against overlap, and two paragraphs of
+/// one article routinely sit above 0.8 cosine under a sentence transformer --
+/// swapping the measure without recalibrating would silently start discarding
+/// the second half of every source.
+pub fn slim_with_vectors(
+    query: &str,
+    articles: &[Article],
+    cfg: &SlimConfig,
+    vectors: Option<Vectors<'_>>,
+) -> Context {
     let query_tokens = text::tokenize(query);
 
     // Flatten to a unit corpus. Headings are kept even when short because they
@@ -213,8 +252,34 @@ pub fn slim(query: &str, articles: &[Article], cfg: &SlimConfig) -> Context {
     };
 
     let source_lengths: Vec<usize> = articles.iter().map(|a| a.units.len().max(1)).collect();
-    for (c, raw) in candidates.iter_mut().zip(&raw_relevance) {
-        c.relevance = if max_rel > 0.0 { raw / max_rel } else { 0.0 };
+
+    // Where each article's units start in the caller's flat vector list.
+    let mut offsets = Vec::with_capacity(articles.len());
+    let mut seen = 0;
+    for article in articles {
+        offsets.push(seen);
+        seen += article.units.len();
+    }
+
+    // Cosine against the query, per candidate, across the pool. Absent or
+    // mismatched vectors simply contribute nothing rather than failing here --
+    // the Python layer rejects a wrong-sized list up front, where the caller
+    // can still act on it.
+    let semantic: Vec<f32> = match &vectors {
+        Some(v) if !v.query.is_empty() => candidates
+            .par_iter()
+            .map(|c| {
+                let flat = offsets[c.source] + c.unit_idx;
+                v.units.get(flat).map_or(0.0, |u| cosine(v.query, u).max(0.0))
+            })
+            .collect(),
+        _ => vec![0.0; candidates.len()],
+    };
+    let w_sem = if vectors.is_some() { cfg.semantic_weight.clamp(0.0, 1.0) } else { 0.0 };
+
+    for ((c, raw), sem) in candidates.iter_mut().zip(&raw_relevance).zip(&semantic) {
+        let lexical = if max_rel > 0.0 { raw / max_rel } else { 0.0 };
+        c.relevance = (1.0 - w_sem) * lexical + w_sem * sem;
         // Journalism and documentation both front-load: a decaying prior on
         // document position is a weak signal, but a consistently correct one.
         let rel_pos = c.unit_idx as f32 / source_lengths[c.source] as f32;
@@ -466,6 +531,23 @@ fn render(
 /// Chosen over Jaccard because a short paragraph fully contained in a longer
 /// one scores 1.0 here and only ~0.4 under Jaccard — and containment is exactly
 /// what syndicated copy looks like.
+/// Cosine similarity, normalising as it goes so callers need not.
+///
+/// Returns 0 for a zero vector or a length mismatch, which is what "no signal"
+/// should look like to the scorer.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
+}
+
 fn overlap(a: &[String], b: &[String]) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -601,6 +683,79 @@ mod tests {
         let ctx = slim("anything", &[], &SlimConfig::default());
         assert_eq!(ctx.tokens, 0);
         assert_eq!(ctx.units_considered, 0);
+    }
+
+    #[test]
+    fn cosine_handles_the_degenerate_cases() {
+        assert_eq!(cosine(&[1.0, 0.0], &[1.0, 0.0]), 1.0);
+        assert!((cosine(&[1.0, 0.0], &[0.0, 1.0])).abs() < 1e-6);
+        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0, "zero vector is no signal");
+        assert_eq!(cosine(&[1.0], &[1.0, 1.0]), 0.0, "length mismatch is no signal");
+        // Callers should not have to normalise.
+        assert!((cosine(&[3.0, 0.0], &[9.0, 0.0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vectors_can_lift_a_unit_bm25_cannot_see() {
+        // The query shares no word with the paragraph that answers it, which
+        // is the case BM25 cannot rank and an embedding model can.
+        let doc = extract(
+            "<html><body><article>\
+             <p>Deep learning, deep learning, deep learning is named here often.</p>\
+             <p>다층 신경망을 여러 겹 쌓아 표현을 학습하는 방법입니다. 충분히 긴 문장입니다.</p>\
+             </article></body></html>",
+            None,
+        )
+        .unwrap();
+        let articles = [doc];
+        let cfg = SlimConfig { max_tokens: 40, ..Default::default() };
+
+        // One vector per unit, in order: the second unit is the match.
+        let units: Vec<Vec<f32>> = articles[0]
+            .units
+            .iter()
+            .enumerate()
+            .map(|(i, _)| if i == 1 { vec![1.0, 0.0] } else { vec![0.0, 1.0] })
+            .collect();
+        let query = [1.0f32, 0.0];
+
+        let plain = slim("deep learning", &articles, &cfg);
+        assert_eq!(
+            plain.selected.first().map(|s| s.unit),
+            Some(0),
+            "BM25 picks the paragraph that repeats the query words"
+        );
+        let hybrid = slim_with_vectors(
+            "deep learning",
+            &articles,
+            &SlimConfig { semantic_weight: 1.0, ..cfg.clone() },
+            Some(Vectors { query: &query, units: &units }),
+        );
+        let picked = |c: &Context| c.selected.first().map(|s| s.unit);
+        assert_ne!(picked(&plain), picked(&hybrid), "vectors changed what was chosen");
+        assert_eq!(picked(&hybrid), Some(1), "the semantic match wins");
+    }
+
+    #[test]
+    fn a_zero_semantic_weight_is_the_lexical_ranking() {
+        let doc = extract(
+            "<html><body><article><p>Tokio drives asynchronous io on many cores here.</p>\
+             <p>Paprika is a spice, and this sentence is long enough to count.</p>\
+             </article></body></html>",
+            None,
+        )
+        .unwrap();
+        let articles = [doc];
+        let units = vec![vec![0.0f32, 1.0]; articles[0].units.len()];
+        let cfg = SlimConfig { semantic_weight: 0.0, ..Default::default() };
+        let a = slim("tokio", &articles, &cfg);
+        let b = slim_with_vectors(
+            "tokio",
+            &articles,
+            &cfg,
+            Some(Vectors { query: &[1.0, 0.0], units: &units }),
+        );
+        assert_eq!(a.markdown, b.markdown);
     }
 
     #[test]
