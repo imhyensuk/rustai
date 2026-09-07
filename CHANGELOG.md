@@ -52,7 +52,11 @@ All notable changes to this project are documented here. The format follows
   runs first pays for cold DNS and TLS — and it lists rustai twice, obeying and
   ignoring `Crawl-delay`, because only rustai reads that line at all. Ignoring
   it, the library fetches fifteen hosts faster than httpx or aiohttp while also
-  fetching every robots.txt.
+  fetching every robots.txt. Each row reports one round whole rather than a
+  median per column, since mixing them produced a line reading 0.3s at 5.4 MB/s
+  for a transfer of 5.4 MB. And the extraction ranking is stated as
+  hardware-dependent rather than settled: `resiliparse` is 2.4× faster than
+  this library on an M1 and slightly slower on Colab's x86 pair.
 - **`benches/quality.py --vs-trafilatura` scores a second extractor on the same
   pages.** A number is not good or bad on its own. trafilatura wins on this
   corpus, 75.1% F1 against 71.7%, and two thirds of the difference is Wikipedia

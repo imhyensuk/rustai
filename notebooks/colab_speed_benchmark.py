@@ -30,7 +30,6 @@ import io
 import json
 import os
 import pathlib
-import statistics
 import subprocess
 import sys
 import time
@@ -331,7 +330,6 @@ if NET_ENABLED:
     # 세 값의 폭이 중앙값보다 크면 그 줄은 믿지 말라고 함께 찍습니다.
     ROUNDS = 3
     results = {label: [] for label, _ in CLIENTS}
-    counts = {}
     for round_no in range(ROUNDS):
         print(f"\n  라운드 {round_no + 1}/{ROUNDS}…")
         for label, run in CLIENTS:
@@ -346,8 +344,7 @@ if NET_ENABLED:
             except Exception as error:
                 print(f"    {label:42} 실패: {type(error).__name__}")
                 continue
-            results[label].append((time.perf_counter() - started, size))
-            counts[label] = ok
+            results[label].append((time.perf_counter() - started, size, ok))
 
     print(f"\n  {'client':44}{'중앙 초':>9}{'폭':>8}{'성공':>8}{'MB/s':>9}")
     for label, _ in CLIENTS:
@@ -355,12 +352,13 @@ if NET_ENABLED:
         if not runs:
             print(f"  {label:44}  측정 없음")
             continue
-        times = sorted(t for t, _ in runs)
-        median = times[len(times) // 2]
-        spread = times[-1] - times[0]
-        size = statistics.median(s for _, s in runs)
+        # 한 라운드를 통째로 고릅니다. 시간·바이트·성공 건수를 따로 중앙값
+        # 내면 한 행 안에서 서로 다른 실행의 숫자가 섞여, 0.3초에 5.4 MB/s 인데
+        # 총 5.4 MB 를 받은 것으로 읽히는 모순이 생깁니다.
+        by_time = sorted(runs)
+        median, size, ok = by_time[len(by_time) // 2]
+        spread = by_time[-1][0] - by_time[0][0]
         rate = (size / (1 << 20)) / median if median else 0
-        ok = counts.get(label, 0)
         if ok < len(targets):
             note = "  ← 일부 실패, 비교 불가"
         elif spread > median:
@@ -377,7 +375,11 @@ print("""
 · 파서(selectolax, bs4)는 본문을 찾지 않습니다. 출력 크기를 보면 광고와
   내비게이션까지 통째로 들어 있는 것이 보입니다. 빠른 것이 당연합니다.
 · 추출기끼리가 진짜 비교입니다. resiliparse 는 C++ 로 쓰인 추출 전용
-  라이브러리이고, 이 축에서는 rustai 보다 빠릅니다.
+  라이브러리이고, 이 축에서 rustai 와 앞서거니 뒤서거니 합니다 -- 그리고
+  어느 쪽이 앞서는지는 기계에 달렸습니다. Apple M1 8코어에서는 resiliparse 가
+  직렬 137 대 57 docs/s 로 2.4배 빨랐고, Colab 의 x86 2 vCPU 에서는 58 대 61 로
+  뒤집혔습니다. 한 대에서 잰 순위를 일반화하지 마세요 -- 이 셀을 여러분의
+  기계에서 돌리는 이유입니다.
 · rustai 가 함께 하는 일 -- 13종 검색 라우팅, RRF 융합, BM25 순위,
   토큰 예산 압축 -- 은 위 어느 라이브러리도 하지 않습니다. 그 값을 이
   표는 재지 않습니다.
