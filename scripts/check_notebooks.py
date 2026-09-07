@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that the notebooks only call rustai the way the installed one works.
+"""Check that the docs only call rustai the way the installed one works.
 
 The notebooks are for Colab, and Colab installs from PyPI. Twice now a
 notebook has been written against the working tree and shipped calling an
@@ -7,15 +7,26 @@ argument that only exists on `main` -- `max_results`, then
 `respect_crawl_delay` -- so the cell died on the first line that touched the
 library, in front of the person who trusted it.
 
-Run this against the *released* package, not the tree, which is the whole
-point:
+The README has the same failure mode and no way back: crates.io and PyPI
+snapshot it at publish time and neither lets you edit it afterwards, so an
+example that does not run is wrong on two package pages until the next
+release.
 
+The two have different targets, so the script takes which to check:
+
+    # Notebooks run on Colab, which installs from PyPI -- check the release.
     python3 -m venv /tmp/released
-    /tmp/released/bin/pip install rustai trafilatura
-    /tmp/released/bin/python scripts/check_notebooks.py
+    /tmp/released/bin/pip install rustai
+    /tmp/released/bin/python scripts/check_notebooks.py notebooks
 
-It reads every `rustai.<name>(...)` call out of every notebook and checks the
-name exists and its keywords are accepted. Keywords guarded by `try:` /
+    # The README documents the version it ships with -- check the tree.
+    python3 scripts/check_notebooks.py docs
+
+Checking the README against the release would fail every time the tree adds an
+API, which is exactly when the README should be describing it.
+
+It reads every `rustai.<name>(...)` call out of every notebook and every
+Markdown code block and checks the name exists and its keywords are accepted. Keywords guarded by `try:` /
 `except TypeError:` are skipped, since that is how a notebook is supposed to
 use something newer than the floor it supports.
 """
@@ -23,18 +34,25 @@ use something newer than the floor it supports.
 import ast
 import json
 import pathlib
+import re
 import sys
 
 import rustai
 
-# `Client(...)` is a class; the rest are functions. Both answer to the same
-# question -- would this call raise TypeError -- but only by being called.
+# Every probe calls the real thing with the real keywords. Only `TypeError`
+# counts as a failure -- anything else means the signature was accepted and the
+# call then failed for its own reasons, which is what we want from a probe that
+# must not touch the network. `research` is steered into an early `ValueError`
+# by an empty provider list for exactly that reason.
 PROBES = {
     "Client": lambda kw: rustai.Client(**{k: _sample(k) for k in kw}),
-    "research": None,       # network; checked for name and arity only
-    "slim": None,
-    "extract": None,
-    "extract_many": None,
+    "research": lambda kw: rustai.research(
+        "q", **{**{k: _sample(k) for k in kw}, "providers": []}
+    ),
+    "slim": lambda kw: rustai.slim("q", [], **{k: _sample(k) for k in kw}),
+    "extract": lambda kw: rustai.extract("<p>x</p>", **{k: _sample(k) for k in kw}),
+    "extract_many": lambda kw: rustai.extract_many([], **{k: _sample(k) for k in kw}),
+    "chunk_many": lambda kw: rustai.chunk_many([], **{k: _sample(k) for k in kw}),
     "count_tokens": None,
     "tokenize": None,
     "density": None,
@@ -43,7 +61,7 @@ PROBES = {
     "parse_sitemap": None,
 }
 
-# Values that are type-correct for the arguments a notebook actually passes.
+# Values that are type-correct for the arguments the docs actually pass.
 SAMPLES = {
     "providers": ["duckduckgo"], "concurrency": 4, "timeout": 5.0,
     "impersonate": "chrome", "respect_robots": True, "respect_crawl_delay": True,
@@ -53,6 +71,10 @@ SAMPLES = {
     "max_tokens": 128, "max_tokens_per_source": 64, "diversity": 0.3,
     "include_links": True, "include_images": False, "include_tables": True,
     "index_mode": "auto", "limit": 3, "max_results": 3, "max_sources": 1,
+    "include_breadcrumbs": True, "query_vector": None, "unit_vectors": None,
+    "semantic_weight": 0.5, "target_tokens": 512, "overlap_tokens": 64,
+    "min_tokens": 24, "urls": None, "url": None, "strict": False,
+    "raise_on_error": False,
 }
 
 
@@ -101,19 +123,46 @@ def calls(source: str):
         yield f.attr, [k.arg for k in node.keywords if k.arg], node.lineno
 
 
+def blocks(path: pathlib.Path):
+    """(label, source) for each independently valid chunk of Python in a file.
+
+    Notebook cells and Markdown fences are both parsed one at a time: each is
+    valid on its own, while the concatenation of several need not be.
+    """
+    if path.suffix == ".ipynb":
+        cells = [c for c in json.loads(path.read_text())["cells"]
+                 if c["cell_type"] == "code"]
+        for number, cell in enumerate(cells, start=1):
+            yield f"셀 {number}", "".join(cell["source"])
+        return
+    # ```python … ``` only. A bare fence is usually shell or output.
+    text = path.read_text()
+    for number, match in enumerate(
+        re.finditer(r"^```(?:python|py)\n(.*?)^```", text, re.M | re.S), start=1
+    ):
+        line = text[: match.start()].count("\n") + 1
+        yield f"{line}행의 블록 {number}", match.group(1)
+
+
 def main() -> None:
-    notebooks = sorted(pathlib.Path("notebooks").glob("*.ipynb"))
-    if not notebooks:
-        sys.exit("notebooks/ 아래에 .ipynb 가 없습니다")
+    which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if which not in ("all", "notebooks", "docs"):
+        sys.exit(f"쓰임: {sys.argv[0]} [all|notebooks|docs]")
+    paths = []
+    if which in ("all", "notebooks"):
+        paths += sorted(pathlib.Path("notebooks").glob("*.ipynb"))
+    if which in ("all", "docs"):
+        paths += [p for p in (pathlib.Path("README.md"), pathlib.Path("CONTRIBUTING.md"))
+                  if p.exists()]
+    if not paths:
+        sys.exit("검사할 노트북이나 문서가 없습니다")
     print(f"rustai {rustai.__version__} 에 대고 검사합니다\n")
 
     problems = 0
-    for path in notebooks:
-        cells = [c for c in json.loads(path.read_text())["cells"]
-                 if c["cell_type"] == "code"]
+    for path in paths:
         print(f"{path.name}")
         found = []
-        for number, cell in enumerate(cells, start=1):
+        for label, raw in blocks(path):
             # `%pip` and `!cmd` are IPython, not Python. Blanking them
             # outright empties any block they are the only statement in, so
             # they become `pass` at their own indentation instead. Test with
@@ -123,15 +172,17 @@ def main() -> None:
             source = "\n".join(
                 (l[: len(l) - len(l.lstrip())] + "pass")
                 if l.lstrip().startswith(("%", "!")) else l
-                for l in "".join(cell["source"]).splitlines()
+                for l in raw.splitlines()
             )
-            # Cells are parsed one at a time: each is valid Python on its own,
-            # while the concatenation of several need not be.
             try:
                 found.extend(calls(source))
-            except SyntaxError as error:
-                print(f"  셀 {number}: 파싱 실패 {error.lineno}행 — {error.msg}")
-                problems += 1
+            except SyntaxError:
+                # A README block is often a fragment -- a signature, a `for`
+                # body -- which is fine to show and impossible to parse. A
+                # notebook cell is a whole program and has no such excuse.
+                if path.suffix == ".ipynb":
+                    print(f"  {label}: 파싱 실패")
+                    problems += 1
         for name, keywords, line in found:
             if not hasattr(rustai, name):
                 print(f"  {line:>4}행  rustai.{name} 이 없습니다")
@@ -146,13 +197,20 @@ def main() -> None:
                 print(f"  {line:>4}행  rustai.{name}({', '.join(keywords)}) → {error}")
                 problems += 1
             except KeyError as error:
-                print(f"  {line:>4}행  {error} 의 견본값이 없습니다 — SAMPLES 에 추가하세요")
+                # Either the argument does not exist, or it does and this
+                # script has never seen it. Both need a human, so say both.
+                print(f"  {line:>4}행  rustai.{name}(… {error} …) — 그런 인자가 "
+                      f"없거나, 새 인자라면 SAMPLES 에 견본값을 넣으세요")
                 problems += 1
+            except Exception:
+                # Anything but TypeError means the signature was accepted and
+                # the call failed on its own terms, which is the probe working.
+                pass
 
     print()
     if problems:
-        sys.exit(f"{problems}건. 노트북은 릴리스된 rustai 에서 돌아야 합니다.")
-    print("노트북의 rustai 호출이 모두 이 버전에서 동작합니다.")
+        sys.exit(f"{problems}건. 문서 예제는 릴리스된 rustai 에서 돌아야 합니다.")
+    print("문서와 노트북의 rustai 호출이 모두 이 버전에서 동작합니다.")
 
 
 if __name__ == "__main__":

@@ -64,6 +64,24 @@ All notable changes to this project are documented here. The format follows
   not saying so.
 ### Added
 
+- **The README now says how this compares, what every call takes, and how each
+  benchmark is run.** A comparison section against `trafilatura`, `resiliparse`,
+  crawler frameworks, hosted search APIs and plain HTTP clients — with the two
+  places this library loses stated first. A complete API reference: every entry
+  point, every `Client` argument, every object's fields, and what
+  `Context.selected` actually holds. And the benchmark section rewritten around
+  the five scripts in `benches/`, each with the corpus its numbers came from,
+  since the synthetic corpus reads 25× faster per document than real pages and
+  quoting the flattering one would be a lie by omission.
+- **`scripts/check_notebooks.py` now checks Markdown too, and calls the
+  functions rather than trusting their names.** crates.io and PyPI snapshot the
+  README at publish time and neither lets you edit it, so a broken example is
+  wrong on two package pages until the next release. Probes now invoke each
+  entry point with the keywords the docs pass, which is what catches a wrong
+  argument name — the previous version checked only that the function existed
+  and would have missed `slim(..., nonexistent_kwarg=1)` entirely. Notebooks
+  are checked against the released package and the README against this
+  checkout, because those are genuinely different targets.
 - **`scripts/check_notebooks.py`, because I shipped this bug twice.** The
   notebooks are for Colab, Colab installs from PyPI, and twice a notebook went
   out calling an argument that existed only on `main` — `max_results`, then

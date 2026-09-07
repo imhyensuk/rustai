@@ -91,6 +91,9 @@ jobs:
       # Editors read the stub, not __doc__, so the two have to say the same
       # thing -- and they only do if something checks.
       - run: python3 scripts/sync_stub_docs.py --check
+      # The README documents the version it ships with, so it is checked
+      # against this checkout rather than the last release.
+      - run: python3 scripts/check_notebooks.py docs
 
   notebooks:
     name: notebooks run on the released rustai
@@ -105,4 +108,5 @@ jobs:
       # only exists on `main` breaks the cell for whoever trusted it -- which
       # has happened twice.
       - run: pip install rustai
-      - run: python3 scripts/check_notebooks.py
+      - name: notebook examples run on the released package
+        run: python3 scripts/check_notebooks.py notebooks

@@ -36,9 +36,58 @@ Rust:
 | Extraction | vendor's | yours to build | built in |
 | Context compression | rarely | yours to build | built in |
 | Scholarly sources | rarely | yours to build | built in |
-| Peak RSS, 200 docs | n/a | +15.5 MB | +4.4 MB |
+| 200 docs | n/a | 0.78s, 55.6 MB | 0.11s, 51.9 MB |
 
 See [Benchmarks](#benchmarks) for how those numbers were produced.
+
+## How it compares
+
+The honest version, because every number below is one this repository measures
+and you can re-run.
+
+**Against extraction libraries** — `trafilatura`, `resiliparse`,
+`readability-lxml`, `justext`. They do one of the five things this does, and
+two of them do it well:
+
+| | rustai | trafilatura | resiliparse |
+|---|---|---|---|
+| Extraction F1, 20 real pages | 72.6% | **75.1%** | not scored |
+| Serial extraction | 64 docs/s | 5 docs/s | **103 docs/s** |
+| Across cores | 77 docs/s | 4 docs/s | **116 docs/s** |
+| Search routing | 13 provider kinds | — | — |
+| Ranking to a token budget | built in | — | — |
+| Tokens to answer a question | **1,884** | 18,968 | 18,968 |
+
+`trafilatura` extracts better. Two thirds of its 2.5-point lead is Wikipedia
+reference lists that it keeps and this library drops — right for recall against
+a page's own container, wrong for a token budget being spent on an answer — but
+the remaining third is prose, and that part is a genuine deficit.
+
+`resiliparse` extracts faster, by 1.6× here. It is C++ and extraction is its
+only job. The ranking flips with the hardware: on an Apple M1 it was 2.4× ahead,
+on Colab's x86 pair it has come out both ahead and 5% behind on different runs.
+Do not trust either number without running it on your machine.
+
+Neither closes the gap that matters. Feeding a question's pages to a model costs
+18,968 tokens through the best extractor and 1,884 through this one, with the
+answer present either way — a tenth, because extraction is not the last stage
+here. **If you want the best article text, use `trafilatura`. If you want the
+fewest tokens that still answer the question, that is this library.**
+
+**Against crawler frameworks** — Scrapy, Crawl4AI. They are frameworks: you
+bring the pipeline and they schedule it. This is a library with one opinion,
+which is the shape of the output. Not benchmarked here, so no numbers claimed.
+
+**Against hosted search and scrape APIs** — Tavily, Exa, Firecrawl, Jina
+Reader. They will out-recall a keyless router because they run their own index.
+They are also metered, keyed, and see every query you make. This runs on your
+machine, costs nothing per call, and works offline for the extraction half.
+
+**Against HTTP clients** — `httpx`, `aiohttp`, `requests`. Fetching fifteen
+distinct hosts, this library is within noise of the async clients while also
+reading every `robots.txt` and honouring the `Crawl-delay` they ignore. On the
+same corpus arXiv asks for fifteen seconds between requests; only this client
+waits.
 
 ## Try it in Colab
 
@@ -288,6 +337,25 @@ budget:
 Output is Markdown with source headers, URLs, heading breadcrumbs and `[…]`
 elision markers, under the token budget you set.
 
+BM25 is lexical, so it cannot see that "딥러닝" and "deep learning" name one
+subject, or that a paragraph explains a term without using it. Pass vectors from
+a model you already run and cosine similarity folds into the same selection —
+this library bundles no embedding model, because that would trade a keyless
+install and a fast build for a few hundred megabytes of weights. Swept over
+nine questions with a multilingual MiniLM, the blend beats both ends: pure BM25
+answers 96%, pure cosine 96%, half and half 100%.
+
+### 5. Or: chunks, if the destination is a vector store
+
+A unit is one block, which is the right grain to *rank* and the wrong one to
+*embed* — on MDN's `Promise` reference the median unit is 37 tokens and a third
+are under 30, so embedding units directly gives 125 vectors that each know
+almost nothing. `article.chunks()` groups them to a target size, starting a new
+chunk at each heading so a chunk opens with the thing that says what it is
+about, and repeating whole units across the boundary so an answer that straddles
+one stays retrievable from either side. The same page becomes 26 chunks with a
+median of 409 tokens, each carrying its URL, title and heading path.
+
 ## Usage
 
 ### One call
@@ -402,6 +470,38 @@ for hit in client.search("sparse attention long context"):
     print(" ", hit.snippet[:120])   # authors (year). abstract…
 ```
 
+### Hybrid ranking with your own embeddings
+
+```python
+articles = client.read(urls)
+units = [u.text for a in articles for u in a.units]     # this exact order
+
+ctx = rustai.slim(
+    "왜 위치 인코딩이 필요한가", articles,
+    query_vector=model.encode("왜 위치 인코딩이 필요한가").tolist(),
+    unit_vectors=model.encode(units).tolist(),
+    semantic_weight=0.5,        # 0 is pure BM25, 1 is pure cosine
+)
+```
+
+One vector per unit, flattened over articles in order. Short units are dropped
+before scoring, so the alignment is against *every* unit rather than the
+survivors — a wrong-sized list is refused with the expected length rather than
+quietly mis-ranked. Vectors need not be normalised.
+
+### Chunks for a vector store
+
+```python
+for chunk in article.chunks(target_tokens=512, overlap_tokens=64):
+    store.add(chunk["text"], metadata=chunk)
+
+chunks = rustai.chunk_many(articles)      # parallel across every core
+```
+
+Each chunk is a dict with `text`, `markdown`, `tokens`, `url`, `title`,
+`heading_path`, `index` and `units` — enough for a retrieved chunk to cite
+itself without a second lookup.
+
 ### Your own sites, without a search engine
 
 ```python
@@ -414,33 +514,128 @@ client = rustai.Client(providers=[
 Feeds and sitemaps are the highest-signal sources here — complete, ordered, and
 free of anyone else's ranking.
 
-### Utilities
+## API reference
+
+Every name below is exported from `rustai`; the stub in
+`python/rustai/_rustai.pyi` carries the same signatures with full docstrings,
+so an editor will complete them.
+
+### Entry points
+
+| Call | Returns | Use it when |
+|---|---|---|
+| `research(query, **kw)` | `Research` | One question, one call, throwaway client |
+| `Client(**kw)` | `Client` | Many questions — the connection pool, robots cache and per-host pacing live here |
+| `extract(html, url=None, **kw)` | `Article` | You already have the HTML |
+| `extract_many(documents, urls=None, **kw)` | `list[Article]` | A batch — parallel across every core, GIL released |
+| `slim(query, articles, **kw)` | `Context` | You assembled the articles yourself |
+| `chunk_many(articles, **kw)` | `list[dict]` | Feeding a vector store |
 
 ```python
-rustai.count_tokens("some text")     # budget estimate, CJK-aware
-rustai.density("some text")          # 0.0–1.0 information density
-rustai.tokenize("한국어 텍스트")       # the ranker's own tokens
-rustai.canonical_url("https://www.x.com/a/?utm_source=b")   # 'x.com/a'
-rustai.parse_feed(xml)               # list[dict]
-rustai.parse_sitemap(xml)            # {"urls": [...], "sitemaps": [...]}
+research(
+    query: str, *,
+    max_sources: int = 5,              # pages actually fetched and read
+    max_tokens: int = 2048,            # context budget
+    max_tokens_per_source: int | None = None,
+    providers: Sequence[str] | None = None,
+    impersonate: str = "chrome",
+    respect_robots: bool = True,
+    contact_email: str | None = None,  # OpenAlex/Crossref polite pool
+) -> Research
 ```
 
-## Errors
+```python
+Client(*,
+    # search
+    providers: Sequence[str] | None = None,
+    max_results: int | None = None,    # hits search returns (was `limit`)
+    contact_email: str | None = None,
+    # fetching
+    concurrency: int = 16,
+    timeout: float = 20.0,
+    impersonate: str = "chrome",       # "chrome", "firefox", "safari", "none"
+    respect_robots: bool = True,
+    respect_crawl_delay: bool = True,  # arXiv asks 15s; this is why a fetch waits
+    per_host_delay: float = 0.25,
+    retries: int = 2,
+    max_retry_after: float = 60.0,
+    max_body_bytes: int = 8 * 1024 * 1024,
+    accept_language: str = "en-US,en;q=0.9",
+    browser_fallback: bool = False,    # headless Chrome, only after a static fetch fails
+    proxies: Sequence[str] | None = None,
+    cookie_file: str | None = None,
+    # extraction
+    include_links: bool = True,
+    include_images: bool = False,
+    include_tables: bool = True,
+    index_mode: IndexMode = "auto",    # "auto" | "never" | "always"
+    # compression
+    max_tokens: int = 2048,
+    max_tokens_per_source: int | None = None,
+    diversity: float = 0.35,
+)
+```
 
-Everything derives from `rustai.RustaiError`:
+`max_results` is **search breadth** — how many fused hits come back, cheap to
+raise because nothing is fetched yet. `max_sources` is **read depth** — how many
+of those are actually fetched and extracted, which is what costs time. So
+`Client(max_results=20).research(q, max_sources=5)` casts a wide net and reads
+the best five of it.
 
-| Exception | Raised when |
+### Client methods
+
+| Method | Returns | Note |
+|---|---|---|
+| `.search(query, *, strict=False)` | `list[SearchResult]` | Fused, deduplicated. A failing provider degrades the set; `strict=True` raises only if *every* one failed |
+| `.fetch(urls, *, raise_on_error=False)` | `list[Page]` | Concurrent. **Not 1:1 with input** — match on `Page.url` |
+| `.read(urls, *, raise_on_error=False)` | `list[Article]` | Fetch and extract. Also not 1:1 |
+| `.research(query, *, max_sources=5)` | `Research` | All four stages |
+| `.save_cookies()` | `None` | Flush the jar to `cookie_file` |
+
+### Objects
+
+| Type | Fields |
 |---|---|
-| `NetworkError` | transport failure, timeout, oversized body |
-| `HttpStatusError` | non-2xx response |
-| `RobotsError` | `robots.txt` disallows the URL |
-| `ExtractError` | the document could not be parsed |
-| `ProviderError` | a search provider failed |
-| `BrowserError` | headless fallback unavailable |
+| `Research` | `query`, `markdown`, `context`, `results`, `articles`, `failures` |
+| `Context` | `query`, `markdown`, `tokens`, `selected`, `sources`, `units_considered` |
+| `Article` | `url`, `kind`, `title`, `markdown`, `text`, `units`, `links`, `meta`, `stats`, `tokens`, `.chunks(...)` |
+| `Unit` | `kind`, `level`, `text`, `markdown`, `heading_path`, `position`, `tokens` |
+| `Page` | `url`, `final_url`, `status`, `body`, `content_type`, `elapsed_ms`, `rendered`, `.extract()` |
+| `SearchResult` | `url`, `title`, `snippet`, `score`, `rank`, `providers` |
+| `Link` | `url`, `text`, `snippet`, `heading_path` |
+| `Meta` | `title`, `description`, `byline`, `published`, `site_name`, `canonical`, `language` |
+| `DenoiseStats` | `html_bytes`, `markdown_bytes`, `compression`, `nodes_visited`, `nodes_dropped` |
 
-Batch calls (`fetch`, `read`) skip failures by default; pass
-`raise_on_error=True` to get the first one instead. `search` returns partial
-results by default; pass `strict=True` to raise when every provider fails.
+`Article.kind` is `"article"` or `"index"`; `Unit.kind` is `"heading"`,
+`"paragraph"`, `"list_item"`, `"code"`, `"quote"` or `"table"`. Every object has
+`.to_dict()`.
+
+`Context.selected` is one dict per chosen unit — `source` and `unit` are
+**indices**, into `Research.articles` and that article's `.units`:
+
+```python
+for sel in ctx.selected:
+    unit = articles[sel["source"]].units[sel["unit"]]
+    print(sel["relevance"], sel["density"], sel["tokens"], unit.text)
+```
+
+### Utilities
+
+| Call | Returns |
+|---|---|
+| `count_tokens(text)` | `int` — the estimate the budget is spent against |
+| `tokenize(text)` | `list[str]` — the tokens the ranker uses |
+| `density(text)` | `float` in `[0, 1]` — information density |
+| `canonical_url(url)` | `str \| None` — the identity used for deduplication |
+| `parse_feed(xml)` | `list[dict]` — RSS or Atom |
+| `parse_sitemap(xml)` | `dict[str, list[str]]` — `urls` and nested `sitemaps` |
+
+### Errors
+
+All inherit `RustaiError`: `NetworkError`, `HttpStatusError`, `RobotsError`,
+`ExtractError`, `ProviderError`, `BrowserError`. Batch calls swallow per-item
+failures by default and report them in `Research.failures`; pass
+`raise_on_error=True` when a missing page is a problem rather than a nuisance.
 
 ## Rust API
 
@@ -499,19 +694,71 @@ some sites you simply should not be scraping.
 
 ## Benchmarks
 
-Reproduce with:
+Five, because they measure different things and only one of them is about speed.
+Each is a script in `benches/`, so every number here is one you can re-run.
+
+| Benchmark | Question | Command |
+|---|---|---|
+| `benchmark.py` | How fast is extraction? | `python benches/benchmark.py` |
+| `quality.py` | Did extraction keep the article? | `python benches/quality.py /tmp/rustai-pages` |
+| `retrieval.py` | Did the answer reach the window? | `python benches/retrieval.py` |
+| `tokens.py` | What did the question cost? | `python benches/tokens.py` |
+| `hybrid.py` | Do embeddings earn their keep? | `python benches/hybrid.py` |
+
+### Speed
+
+Two corpora, and the difference between them matters more than either number.
+
+**Synthetic** — 200 generated pages, 46 KB each, deterministic and
+redistributable. `python benches/corpus.py /tmp/rustai-corpus` builds it.
+
+| Engine | Throughput | vs `trafilatura` |
+|---|---|---|
+| `rustai.extract_many` | **5,898 docs/s** | **39×** |
+| `rustai.extract` (loop) | 1,681 docs/s | 11× |
+| `trafilatura` | 150 docs/s | 1× |
+
+**Real pages** — 15 live pages including Wikipedia articles over 1 MB. Fetch
+them with `benches/fetch_corpus.py`.
+
+| Engine | Serial | Across cores |
+|---|---|---|
+| `resiliparse` | **103 docs/s** | **116 docs/s** |
+| `rustai` | 64 docs/s | 77 docs/s |
+| `justext` | 14 | 12 |
+| `trafilatura` | 5 | 4 |
+
+Real pages are 25× slower per document than synthetic ones, because they are
+seven times larger and far messier. **Quote the second table.** The first is
+useful for spotting a regression against a fixed input, not for deciding
+whether this is fast enough for you.
+
+`trafilatura` gains nothing from threads — it holds the GIL. `extract_many`
+releases it and spreads across the rayon pool, which is where its multiple comes
+from. Apple M1, 8 cores, CPython 3.14; `notebooks/colab_speed_benchmark.ipynb`
+runs the same comparison wherever you are, and the ranking does move with the
+hardware.
+
+### Extraction quality
 
 ```bash
-python benches/corpus.py /tmp/rustai-corpus
-cargo run --release --example bench -- /tmp/rustai-corpus   # Rust only
-python benches/benchmark.py                                  # batch, vs bs4+lxml
-RUSTAI_BENCH_STREAM=1 python benches/benchmark.py            # streaming
+python benches/fetch_corpus.py /tmp/rustai-pages
+python benches/quality.py      /tmp/rustai-pages --vs-trafilatura
 ```
 
-The corpus is 200 synthetic article pages, 9.43 MB of HTML, ~46 KB each, shaped
-like real ones: heavy chrome, nested wrappers, ad slots, a sidebar, a script
-blob. Synthetic so the benchmark is deterministic and redistributable — the
-chrome-to-content ratio is what an extractor is tested on, not raw size.
+Twenty real pages, scored two ways at once: five-word shingle overlap with each
+page's own article container, and a count of site furniture that reached the
+output.
+
+| | recall | precision | F1 | furniture |
+|---|---|---|---|---|
+| `rustai` | 65.3% | 85.5% | 72.6% | 3 |
+| `trafilatura` | 68.3% | 88.2% | **75.1%** | 4 |
+
+Both numbers are needed. Judged on overlap alone the best setting is to switch
+every threshold off — the container being compared against never held the
+navigation, so passing the whole page through scores *better* while quadrupling
+the furniture. That is why `min_block_len` stays where it is.
 
 ### What a question costs
 
@@ -519,7 +766,7 @@ chrome-to-content ratio is what an extractor is tested on, not raw size.
 python benches/tokens.py
 ```
 
-Five stages, each where somebody's pipeline actually stops, averaged over seven
+Five stages, each where somebody's pipeline actually stops, over seven
 questions:
 
 ```
@@ -533,111 +780,30 @@ rustai slim    1,884   (0.8%)                100%
 A dedicated extractor gets you to 8%. Ranking and a token budget get you to
 0.8%, a tenth of that, with the answer still present in every question — which
 is checked, because a benchmark counting only tokens would reward returning
-nothing. On a 3B model with a 32k window the raw pages for "딥러닝이 뭐야?"
+nothing. On a 3B model with a 32k window the raw pages behind "딥러닝이 뭐야?"
 do not fit at all, at 593,439 tokens; the context that answers it is 1,627.
 
-### Bring your own embedding model
-
-```python
-units = [u.text for a in articles for u in a.units]
-ctx = rustai.slim(
-    query, articles,
-    query_vector=model.encode(query).tolist(),
-    unit_vectors=model.encode(units).tolist(),
-    semantic_weight=0.5,          # 0 is pure BM25, 1 is pure vector
-)
-```
-
-BM25 cannot see that "딥러닝" and "deep learning" name the same subject, or
-that a paragraph explains a term without using it. A model you already run can.
-This library does not bundle one — that would trade a keyless install and a
-fast build for a few hundred megabytes of weights — but it will fold cosine
-similarity into the same selection, across every core, with the GIL released.
-
-Swept over the nine `retrieval.py` queries with a multilingual MiniLM:
-
-```
-semantic_weight   0.0    0.25   0.5    0.75   1.0
-answer found      96%    100%   100%   96%    96%
-```
-
-Both ends lose. Pure BM25 misses "layer" in an answer about deep learning that
-never uses the word; pure cosine loses the question where the exact terms are
-the point. Reproduce with `python benches/hybrid.py`. Embedding is the
-expensive half — 1.2s to 7.9s for 96 to 2,249 units, against 2–4s for the whole
-search-and-extract pipeline — so it is worth reaching for on a question BM25
-cannot phrase, not by default.
-
-### Chunks for a vector store
-
-```python
-for chunk in article.chunks(target_tokens=512, overlap_tokens=64):
-    store.add(chunk["text"], metadata=chunk)
-
-chunks = rustai.chunk_many(articles)      # parallel across every core
-```
-
-A `Unit` is one block, which is the grain ranking wants and the wrong one to
-embed: on MDN's `Promise` reference the median unit is 37 tokens and a third
-are under 30. Grouped, the same page is 26 chunks with a median of 409. Each
-carries its URL, title and heading path, so a retrieved chunk can cite itself.
-
-Extraction *quality* needs the opposite corpus — real pages, since synthetic
-ones only contain the mess this repository thought to write:
+### Did the answer arrive?
 
 ```bash
-python benches/fetch_corpus.py /tmp/rustai-pages
-python benches/quality.py      /tmp/rustai-pages
+python benches/retrieval.py
 ```
 
-The page list is checked in; the pages themselves are fetched, being other
-people's copyright and worth re-reading as the sites change. Over 20 scoreable
-pages: recall 65.0%, precision 84.0%, F1 71.7%, with 3 pieces of site furniture
-leaking. Both numbers matter — judged on overlap alone the best setting is to
-switch every threshold off, which quadruples the furniture.
+Nine questions spanning explanation, an event on a date, and a current-value
+lookup. Each carries the patterns any correct source would contain, so the
+measurement holds no model and no prompt and does not move when you change
+either: **answer present 96%, 90% of the budget spent on sources that mention
+the subject, median 3.2s.**
 
-**Rust alone**, streaming one document at a time (Apple M1, macOS 26.6, release
-build):
+Adding a caller's embedding model takes the first number to 100% at
+`semantic_weight` between 0.25 and 0.5 — `python benches/hybrid.py` sweeps it.
 
-```
-documents      200
-input          9.43 MB
-output         2.27 MB in 12000 units
-compression    75.9%
-throughput     638 docs/s, 30.1 MB/s
-peak RSS       4.9 MiB
-```
+### Caveats worth stating plainly
 
-**From Python** (CPython 3.14):
-
-| Engine | Throughput | vs `trafilatura` |
-|---|---|---|
-| `rustai.extract_many` | **3,545 docs/s** | **16.1×** |
-| `rustai.extract` (loop) | 840 docs/s | 3.8× |
-| `trafilatura` | 220 docs/s | 1× |
-
-Median of three runs. `trafilatura` is the fair comparison — it is the closest
-equivalent, since it also produces structured Markdown — and both emit the same
-2.27 MB of output from the same input. `extract_many` runs across the rayon pool
-with the GIL released, which is where the further 4.2× comes from.
-
-Peak process RSS, streaming one document at a time: `rustai` 39.3 MB against
-`bs4`+`lxml`'s 50.4 MB — **+4.4 MB** versus **+15.5 MB** over the 34.9 MB floor
-of a CPython 3.14 interpreter holding the corpus.
-
-Concurrent fetching, measured on 20 live URLs across many hosts: 1.7 pages/s
-serial versus 15.1 concurrent, an **8.7× speedup**. Beyond that the bottleneck
-is the remote server, not this library.
-
-"Marginal RSS" subtracts the 34.9 MB floor of a CPython 3.14 interpreter holding
-the corpus, which both engines pay identically. Importing `rustai` itself costs
-1.0 MB over a bare interpreter.
-
-Caveats worth stating plainly. The `bs4` baseline produces a flat string while
-`rustai` produces structured Markdown units with metadata, so that row
-understates `rustai`'s work per document; the `trafilatura` row is the honest
-comparison. And these are single-machine numbers on one synthetic corpus — run
-the benchmark on your own pages before trusting them.
+Single-machine numbers on corpora this repository chose. The extraction ranking
+against `resiliparse` has flipped between runs on the same Colab instance. The
+retrieval and token benchmarks hit the live web, so they move with what search
+returns that day. Run them on your own pages before trusting any of it.
 
 ## Development
 
