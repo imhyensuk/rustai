@@ -371,6 +371,15 @@ class Client:
     and reads the best five of it. `max_results` was called `limit` in 0.2.0
     and that name still works.
 
+    `respect_crawl_delay` is why a fetch sometimes stalls for a long time with
+    nothing on the network. A site may publish a `Crawl-delay` in its
+    `robots.txt` and this client honours it: arXiv asks for fifteen seconds
+    between requests, so a second arXiv URL through the same client waits that
+    long. A *new* client has not visited anything yet and so does not wait,
+    which is worth knowing before concluding that reusing a client is slow.
+    Setting this to `False` ignores a published request; do that for a host you
+    own. `per_host_delay` does not override it — the larger of the two wins.
+
     `max_tokens_per_source` caps how much any one page may contribute to the
     context. Leaving it `None` is right for most questions: measured over six
     queries at budgets of 1,000, 2,048 and 4,096 tokens, capping either
@@ -388,6 +397,7 @@ class Client:
         timeout: float = 20.0,
         impersonate: str = "chrome",
         respect_robots: bool = True,
+        respect_crawl_delay: bool = True,
         per_host_delay: float = 0.25,
         retries: int = 2,
         max_body_bytes: int = 8388608,

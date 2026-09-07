@@ -214,9 +214,10 @@ if NET_ENABLED:
     print("\n" + "=" * 74)
     print("C. 네트워크 수집 — 서로 다른 호스트 15곳")
     print("=" * 74)
-    print("  · rustai 는 호스트마다 robots.txt 를 먼저 받습니다. 15개 호스트면")
-    print("    요청이 30건이고 나머지는 15건입니다. 같은 속도가 같은 예의를")
-    print("    뜻하지 않습니다.")
+    print("  · rustai 만 robots.txt 를 읽습니다. 호스트마다 요청이 한 건 더")
+    print("    붙고, 거기 적힌 Crawl-delay 를 지킵니다. 이 코퍼스의 arXiv 는")
+    print("    요청 간 15초를 요구합니다 -- 나머지 클라이언트는 그 줄을 읽지")
+    print("    않으므로, 같은 속도가 같은 예의를 뜻하지 않습니다.")
     print("  · 실패한 요청은 시간을 쓰지 않습니다. 절반을 놓친 클라이언트는")
     print("    그만큼 빨라 보이므로, 성공 건수를 함께 보세요.")
     targets = [u for u, _ in fetched]   # fetched 는 (url, html) 입니다
@@ -286,17 +287,20 @@ if NET_ENABLED:
             return len(good), sum(good)
         return in_own_loop(go)
 
-    def by_rustai_fresh():
-        # 같은 Client 를 재사용하면 두 번째 배치부터 급격히 느려집니다 --
-        # robots 준수와 재사용이 동시에 켜져 있을 때만 그렇고, 개별 페이지의
-        # elapsed_ms 는 그대로입니다. 두 줄을 나란히 두어 그 차이가 보이게 합니다.
-        fresh = rustai.Client(timeout=30.0, concurrency=16)
-        pages = fresh.fetch(targets)
+    # 아래 클라이언트 중 rustai 만 Crawl-delay 를 읽습니다. 이 코퍼스의 arXiv
+    # 가 robots.txt 에서 요청 간 15초를 요구하므로, 같은 클라이언트로 두 번째
+    # arXiv 요청을 보내면 15초를 기다립니다 -- 느린 것이 아니라 시킨 대로 한
+    # 것입니다. 두 줄을 나란히 두어 그 값이 얼마인지 보이게 합니다.
+    rude_client = rustai.Client(timeout=30.0, concurrency=16,
+                                respect_crawl_delay=False)
+
+    def by_rustai_rude():
+        pages = rude_client.fetch(targets)
         return len(pages), sum(len(page.body.encode()) for page in pages)
 
     CLIENTS = [
-        ("rustai Client.fetch (재사용, robots 준수)", by_rustai),
-        ("rustai Client.fetch (매번 새 Client)", by_rustai_fresh),
+        ("rustai (Crawl-delay 준수 — arXiv 가 15초 요구)", by_rustai),
+        ("rustai (Crawl-delay 무시 — 아래와 같은 조건)", by_rustai_rude),
         ("requests 순차", by_requests),
         ("httpx 비동기", by_httpx),
         ("aiohttp 비동기", by_aiohttp),
@@ -367,9 +371,8 @@ print("""
   표는 재지 않습니다.
 · 네트워크 수치는 회선과 상대 서버에 좌우되므로 세 라운드의 중앙값을 씁니다.
   폭이 중앙값보다 크면 그 줄은 믿지 마세요.
-· rustai 의 두 줄이 크게 벌어져 있다면 그것이 정상입니다. 같은 Client 를
-  재사용하면서 robots 를 준수할 때 두 번째 배치부터 급격히 느려지는 결함이
-  있습니다. 새 Client 로 재면 robots.txt 를 호스트마다 추가로 받으면서도
-  비동기 클라이언트들과 대등합니다 -- HTTP 스택이 아니라 재사용 경로의
-  문제입니다.
+· rustai 의 두 줄 사이 간격이 예의의 값입니다. 위쪽은 arXiv 가 요청한 15초를
+  지키느라 느리고, 아래쪽은 그 줄을 무시해 다른 클라이언트와 같은 조건이
+  됩니다. 아래쪽 수치로 비교하세요 -- 그러면 rustai 는 robots.txt 를 호스트마다
+  더 받으면서도 비동기 클라이언트들과 대등합니다.
 """)

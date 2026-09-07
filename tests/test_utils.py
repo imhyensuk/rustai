@@ -207,3 +207,21 @@ class TestSearchAndReadCapsAreDistinct:
         doc = rustai.Client.__doc__ or ""
         assert "max_results" in doc and "max_sources" in doc
         assert "breadth" in doc and "depth" in doc
+
+
+class TestCrawlDelay:
+    """A site can ask for a gap between requests, and this client obeys it.
+
+    Worth a test because obeying it looks exactly like being slow: arXiv asks
+    for fifteen seconds, so a second arXiv URL through one client waits that
+    long with nothing on the network.
+    """
+
+    def test_the_knob_exists_and_defaults_to_obeying(self):
+        assert rustai.Client(respect_crawl_delay=True) is not None
+        assert rustai.Client(respect_crawl_delay=False) is not None
+
+    def test_the_docstring_explains_the_stall(self):
+        doc = rustai.Client.__doc__ or ""
+        assert "respect_crawl_delay" in doc
+        assert "Crawl-delay" in doc

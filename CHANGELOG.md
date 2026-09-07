@@ -21,20 +21,16 @@ All notable changes to this project are documented here. The format follows
   every correct source on the other scored below 0.10, so a fixed cutoff drops
   the good set and keeps the bad one. The field invited exactly that mistake by
   not saying so.
-### Fixed
-
-- Nothing yet for this, but recording it where it will be found: **reusing a
-  `Client` while `respect_robots` is on makes the second and later batch
-  fetches roughly ten times slower.** Eleven URLs across eleven hosts take 1.3s
-  on a fresh client every time, and 2.9s → 12.4s → 15.0s on one that is reused,
-  with every page's own `elapsed_ms` staying under 500ms throughout. It needs
-  both conditions: a fresh client each batch is fine, and so is a reused client
-  with `respect_robots=False`. Retries and `per_host_delay` are not involved —
-  setting either to zero changes nothing. The class docstring tells people to
-  build one client and keep it, which is currently the slow path.
-
 ### Added
 
+- **`respect_crawl_delay` is now settable from Python.** It existed in the Rust
+  config and nowhere else, so a Python caller could neither turn it off nor
+  discover why a fetch had stalled. A site may publish a `Crawl-delay` in its
+  `robots.txt` and this client honours it: arXiv asks for fifteen seconds, so a
+  second arXiv URL through the same client waits that long with nothing on the
+  network. A new client has not visited anything and does not wait, which is
+  how this looks like "reusing a client is slow" until you find the directive.
+  `per_host_delay` does not override it — the larger of the two wins.
 - **`notebooks/colab_speed_benchmark.ipynb` times this library against five other
   extractors and three HTTP clients.** One cell, real pages, and it separates
   parsers from extractors with output sizes alongside, since comparing the speed
@@ -42,7 +38,12 @@ All notable changes to this project are documented here. The format follows
   mislead. On eight cores it does not flatter us: `resiliparse` extracts 2.4×
   faster serially and 2.7× faster across cores. Against `trafilatura` the ratio
   runs the other way, 8× serially and 29× across cores, because `trafilatura`
-  holds the GIL and gains nothing from threads.
+  holds the GIL and gains nothing from threads. The network stage runs three
+  rounds and reports a median, since a single measurement lies there — whoever
+  runs first pays for cold DNS and TLS — and it lists rustai twice, obeying and
+  ignoring `Crawl-delay`, because only rustai reads that line at all. Ignoring
+  it, the library fetches fifteen hosts faster than httpx or aiohttp while also
+  fetching every robots.txt.
 - **`benches/quality.py --vs-trafilatura` scores a second extractor on the same
   pages.** A number is not good or bad on its own. trafilatura wins on this
   corpus, 75.1% F1 against 71.7%, and two thirds of the difference is Wikipedia

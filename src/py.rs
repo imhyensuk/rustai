@@ -652,6 +652,15 @@ impl PyResearch {
 /// and reads the best five of it. `max_results` was called `limit` in 0.2.0
 /// and that name still works.
 ///
+/// `respect_crawl_delay` is why a fetch sometimes stalls for a long time with
+/// nothing on the network. A site may publish a `Crawl-delay` in its
+/// `robots.txt` and this client honours it: arXiv asks for fifteen seconds
+/// between requests, so a second arXiv URL through the same client waits that
+/// long. A *new* client has not visited anything yet and so does not wait,
+/// which is worth knowing before concluding that reusing a client is slow.
+/// Setting this to `False` ignores a published request; do that for a host you
+/// own. `per_host_delay` does not override it — the larger of the two wins.
+///
 /// `max_tokens_per_source` caps how much any one page may contribute to the
 /// context. Leaving it `None` is right for most questions: measured over six
 /// queries at budgets of 1,000, 2,048 and 4,096 tokens, capping either
@@ -677,6 +686,7 @@ impl PyClient {
         timeout = 20.0,
         impersonate = "chrome",
         respect_robots = true,
+        respect_crawl_delay = true,
         per_host_delay = 0.25,
         retries = 2,
         max_body_bytes = 8 * 1024 * 1024,
@@ -703,6 +713,7 @@ impl PyClient {
         timeout: f64,
         impersonate: &str,
         respect_robots: bool,
+        respect_crawl_delay: bool,
         per_host_delay: f64,
         retries: u32,
         max_body_bytes: usize,
@@ -762,6 +773,7 @@ impl PyClient {
             retries,
             per_host_delay: std::time::Duration::from_secs_f64(per_host_delay.max(0.0)),
             respect_robots,
+            respect_crawl_delay,
             impersonate: Impersonate::parse(impersonate)?,
             accept_language: accept_language.to_string(),
             browser_fallback,
@@ -1060,6 +1072,7 @@ fn research(
         20.0,
         impersonate,
         respect_robots,
+        true,
         0.25,
         2,
         8 * 1024 * 1024,

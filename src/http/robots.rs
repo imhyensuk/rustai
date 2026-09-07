@@ -217,6 +217,25 @@ mod tests {
     }
 
     #[test]
+    fn a_wildcard_crawl_delay_is_picked_up() {
+        // arXiv publishes exactly this, and honouring it is why a second
+        // request to the same host through one client waits fifteen seconds.
+        let r = Robots::parse("User-agent: *\nCrawl-delay: 15\nAllow: /list\n", "rustai");
+        assert_eq!(r.crawl_delay, Some(15.0));
+    }
+
+    #[test]
+    fn a_crawl_delay_in_a_comment_is_not_a_directive() {
+        // Wikipedia's robots.txt discusses crawl-delay in prose. Reading that
+        // as a directive would stall every request to it.
+        let r = Robots::parse(
+            "# semrushbot respects crawl-delay directives\nUser-agent: *\nDisallow: /w/\n",
+            "rustai",
+        );
+        assert_eq!(r.crawl_delay, None);
+    }
+
+    #[test]
     fn missing_file_allows_all() {
         assert!(Robots::allow_all().allows("/anything"));
     }
