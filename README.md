@@ -58,6 +58,13 @@ earlier. Each question is answered twice by the same model, once from memory and
 once from retrieved context, because a retrieval library that is never compared
 against not retrieving is a library nobody has measured.
 
+[`colab_speed_benchmark.ipynb`](notebooks/colab_speed_benchmark.ipynb) times this
+library against five other extractors and three HTTP clients on the same pages, in
+one cell. It does not flatter us: `resiliparse`, a C++ extraction library, is faster
+on that axis, and the notebook says so before you run it. It also separates parsers
+from extractors and prints output sizes, because comparing the speed of two things
+that are not doing the same work is how most scraping benchmarks mislead.
+
 [`colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb) walks the same
 ground more slowly, and [`colab_oneshot.ipynb`](notebooks/colab_oneshot.ipynb)
 is a single cell that installs and prints a report. Both predate the PyPI

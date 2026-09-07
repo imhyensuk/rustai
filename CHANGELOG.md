@@ -21,6 +21,14 @@ All notable changes to this project are documented here. The format follows
   every correct source on the other scored below 0.10, so a fixed cutoff drops
   the good set and keeps the bad one. The field invited exactly that mistake by
   not saying so.
+- **`notebooks/colab_speed_benchmark.ipynb` times this library against five other
+  extractors and three HTTP clients.** One cell, real pages, and it separates
+  parsers from extractors with output sizes alongside, since comparing the speed
+  of two things that are not doing the same work is how scraping benchmarks
+  mislead. On eight cores it does not flatter us: `resiliparse` extracts 2.4×
+  faster serially and 2.7× faster across cores. Against `trafilatura` the ratio
+  runs the other way, 8× serially and 29× across cores, because `trafilatura`
+  holds the GIL and gains nothing from threads.
 - **`benches/quality.py --vs-trafilatura` scores a second extractor on the same
   pages.** A number is not good or bad on its own. trafilatura wins on this
   corpus, 75.1% F1 against 71.7%, and two thirds of the difference is Wikipedia
