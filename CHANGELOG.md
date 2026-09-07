@@ -21,6 +21,20 @@ All notable changes to this project are documented here. The format follows
   every correct source on the other scored below 0.10, so a fixed cutoff drops
   the good set and keeps the bad one. The field invited exactly that mistake by
   not saying so.
+### Fixed
+
+- Nothing yet for this, but recording it where it will be found: **reusing a
+  `Client` while `respect_robots` is on makes the second and later batch
+  fetches roughly ten times slower.** Eleven URLs across eleven hosts take 1.3s
+  on a fresh client every time, and 2.9s → 12.4s → 15.0s on one that is reused,
+  with every page's own `elapsed_ms` staying under 500ms throughout. It needs
+  both conditions: a fresh client each batch is fine, and so is a reused client
+  with `respect_robots=False`. Retries and `per_host_delay` are not involved —
+  setting either to zero changes nothing. The class docstring tells people to
+  build one client and keep it, which is currently the slow path.
+
+### Added
+
 - **`notebooks/colab_speed_benchmark.ipynb` times this library against five other
   extractors and three HTTP clients.** One cell, real pages, and it separates
   parsers from extractors with output sizes alongside, since comparing the speed

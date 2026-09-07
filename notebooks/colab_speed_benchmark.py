@@ -30,6 +30,7 @@ import io
 import json
 import os
 import pathlib
+import statistics
 import subprocess
 import sys
 import time
@@ -213,40 +214,15 @@ if NET_ENABLED:
     print("\n" + "=" * 74)
     print("C. 네트워크 수집 — 서로 다른 호스트 15곳")
     print("=" * 74)
-    print("  주의: rustai 는 호스트마다 robots.txt 를 먼저 확인하고 호스트별")
-    print("  간격을 지킵니다. 아래 다른 라이브러리는 둘 다 하지 않습니다 --")
-    print("  같은 속도가 같은 예의를 뜻하지 않습니다.")
+    print("  · rustai 는 호스트마다 robots.txt 를 먼저 받습니다. 15개 호스트면")
+    print("    요청이 30건이고 나머지는 15건입니다. 같은 속도가 같은 예의를")
+    print("    뜻하지 않습니다.")
+    print("  · 실패한 요청은 시간을 쓰지 않습니다. 절반을 놓친 클라이언트는")
+    print("    그만큼 빨라 보이므로, 성공 건수를 함께 보세요.")
     targets = [u for u, _ in fetched]   # fetched 는 (url, html) 입니다
 
-    def net(label, fn):
-        gc.collect()
-        start = time.perf_counter()
-        got = fn()
-        seconds = time.perf_counter() - start
-        note = "   ← 전부 실패, 회선이나 인자를 확인하세요" if got == 0 else ""
-        print(f"  {label:44}{seconds:>7.1f}s  {got}/{len(targets)}건{note}")
-
-    client = rustai.Client(timeout=30.0, concurrency=16)
-    net("rustai Client.fetch (동시 16, robots 준수)",
-        lambda: len(client.fetch(targets)))
-
-    try:
-        import requests
-        def seq():
-            n = 0
-            with requests.Session() as s:
-                for u in targets:
-                    try:
-                        n += s.get(u, headers={"User-Agent": AGENT}, timeout=30).ok
-                    except Exception:
-                        pass
-            return n
-        net("requests 순차 (robots 확인 안 함)", seq)
-    except ImportError:
-        pass
-
     # 노트북에는 이미 이벤트 루프가 돌고 있어 asyncio.run 이 거부됩니다.
-    # 코루틴을 제 루프를 가진 별도 스레드에서 돌리면 어느 쪽에서든 동작합니다.
+    # 코루틴을 제 루프를 가진 스레드에서 돌리면 어느 쪽에서든 동작합니다.
     import asyncio
     import threading
 
@@ -264,34 +240,119 @@ if NET_ENABLED:
             raise box["error"]
         return box["value"]
 
-    try:
+    http_client = rustai.Client(timeout=30.0, concurrency=16)
+
+    def by_rustai():
+        pages = http_client.fetch(targets)
+        return len(pages), sum(len(page.body.encode()) for page in pages)
+
+    def by_requests():
+        import requests
+        ok = size = 0
+        with requests.Session() as session:
+            for url in targets:
+                try:
+                    r = session.get(url, headers={"User-Agent": AGENT}, timeout=30)
+                    if r.ok:
+                        ok += 1
+                        size += len(r.content)
+                except Exception:
+                    pass
+        return ok, size
+
+    def by_httpx():
         import httpx
-        async def with_httpx():
+        async def go():
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
                 rs = await asyncio.gather(
                     *(c.get(u, headers={"User-Agent": AGENT}) for u in targets),
                     return_exceptions=True)
-            return sum(1 for r in rs if not isinstance(r, Exception))
-        net("httpx 비동기 (robots 확인 안 함)", lambda: in_own_loop(with_httpx))
-    except Exception as error:
-        print(f"  건너뜀 httpx: {type(error).__name__}: {str(error)[:50]}")
+            good = [r for r in rs if not isinstance(r, Exception)]
+            return len(good), sum(len(r.content) for r in good)
+        return in_own_loop(go)
 
-    try:
+    def by_aiohttp():
         import aiohttp
-        async def with_aiohttp():
+        async def go():
             async with aiohttp.ClientSession(
                     headers={"User-Agent": AGENT},
                     timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async def one(u):
                     async with session.get(u) as r:
-                        await r.read()
-                        return r.status < 400
-                rs = await asyncio.gather(*(one(u) for u in targets),
-                                          return_exceptions=True)
-            return sum(1 for r in rs if r is True)
-        net("aiohttp 비동기 (robots 확인 안 함)", lambda: in_own_loop(with_aiohttp))
-    except Exception as error:
-        print(f"  건너뜀 aiohttp: {type(error).__name__}: {str(error)[:50]}")
+                        return len(await r.read()) if r.status < 400 else 0
+                sizes = await asyncio.gather(*(one(u) for u in targets),
+                                             return_exceptions=True)
+            good = [n for n in sizes if isinstance(n, int) and n]
+            return len(good), sum(good)
+        return in_own_loop(go)
+
+    def by_rustai_fresh():
+        # 같은 Client 를 재사용하면 두 번째 배치부터 급격히 느려집니다 --
+        # robots 준수와 재사용이 동시에 켜져 있을 때만 그렇고, 개별 페이지의
+        # elapsed_ms 는 그대로입니다. 두 줄을 나란히 두어 그 차이가 보이게 합니다.
+        fresh = rustai.Client(timeout=30.0, concurrency=16)
+        pages = fresh.fetch(targets)
+        return len(pages), sum(len(page.body.encode()) for page in pages)
+
+    CLIENTS = [
+        ("rustai Client.fetch (재사용, robots 준수)", by_rustai),
+        ("rustai Client.fetch (매번 새 Client)", by_rustai_fresh),
+        ("requests 순차", by_requests),
+        ("httpx 비동기", by_httpx),
+        ("aiohttp 비동기", by_aiohttp),
+    ]
+
+    # 이 단계는 소음이 큽니다. 한 번 재서 보고하면 거짓말을 하게 됩니다.
+    #
+    # 순서 편향이 두 겹입니다. 맨 먼저 도는 쪽이 DNS 조회와 TLS 핸드셰이크를
+    # 차갑게 감당하고 뒤따르는 쪽은 그 온기를 물려받습니다 -- 그대로 재면
+    # 15개 호스트를 순차로 0.4초에 도는, 있을 수 없는 수치가 나옵니다. 예열을
+    # 앞에 몰아 두면 이번에는 예열과 측정 사이 간격이 클라이언트마다 달라집니다.
+    # 여기에 더해, 같은 호스트를 반복해 두드리면 레이트 리밋이 걸리기 시작하고
+    # robots 를 확인하는 쪽은 요청이 두 배라 먼저 걸립니다.
+    #
+    # 그래서 각자 자기 측정 직전에 예열하고, 세 라운드의 중앙값을 씁니다.
+    # 세 값의 폭이 중앙값보다 크면 그 줄은 믿지 말라고 함께 찍습니다.
+    ROUNDS = 3
+    results = {label: [] for label, _ in CLIENTS}
+    counts = {}
+    for round_no in range(ROUNDS):
+        print(f"\n  라운드 {round_no + 1}/{ROUNDS}…")
+        for label, run in CLIENTS:
+            try:
+                run()            # 예열. 결과는 버립니다.
+            except Exception:
+                pass
+            gc.collect()
+            started = time.perf_counter()
+            try:
+                ok, size = run()
+            except Exception as error:
+                print(f"    {label:42} 실패: {type(error).__name__}")
+                continue
+            results[label].append((time.perf_counter() - started, size))
+            counts[label] = ok
+
+    print(f"\n  {'client':44}{'중앙 초':>9}{'폭':>8}{'성공':>8}{'MB/s':>9}")
+    for label, _ in CLIENTS:
+        runs = results[label]
+        if not runs:
+            print(f"  {label:44}  측정 없음")
+            continue
+        times = sorted(t for t, _ in runs)
+        median = times[len(times) // 2]
+        spread = times[-1] - times[0]
+        size = statistics.median(s for _, s in runs)
+        rate = (size / (1 << 20)) / median if median else 0
+        ok = counts.get(label, 0)
+        if ok < len(targets):
+            note = "  ← 일부 실패, 비교 불가"
+        elif spread > median:
+            note = "  ← 편차가 큼, 믿지 마세요"
+        else:
+            note = ""
+        print(f"  {label:44}{median:>9.1f}{spread:>8.1f}{ok:>5}/{len(targets)}"
+              f"{rate:>9.1f}{note}")
 
 print("\n" + "=" * 74)
 print("읽는 법")
@@ -304,5 +365,11 @@ print("""
 · rustai 가 함께 하는 일 -- 13종 검색 라우팅, RRF 융합, BM25 순위,
   토큰 예산 압축 -- 은 위 어느 라이브러리도 하지 않습니다. 그 값을 이
   표는 재지 않습니다.
-· 네트워크 수치는 회선과 상대 서버에 좌우됩니다. 여러 번 돌려보세요.
+· 네트워크 수치는 회선과 상대 서버에 좌우되므로 세 라운드의 중앙값을 씁니다.
+  폭이 중앙값보다 크면 그 줄은 믿지 마세요.
+· rustai 의 두 줄이 크게 벌어져 있다면 그것이 정상입니다. 같은 Client 를
+  재사용하면서 robots 를 준수할 때 두 번째 배치부터 급격히 느려지는 결함이
+  있습니다. 새 Client 로 재면 robots.txt 를 호스트마다 추가로 받으면서도
+  비동기 클라이언트들과 대등합니다 -- HTTP 스택이 아니라 재사용 경로의
+  문제입니다.
 """)
