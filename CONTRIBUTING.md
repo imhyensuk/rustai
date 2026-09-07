@@ -65,6 +65,18 @@ python benches/fetch_corpus.py /tmp/rustai-pages
 python benches/quality.py      /tmp/rustai-pages
 ```
 
+What the router and slimmer put in the context window, with no model in the
+loop, because a number that describes rustai should not move when someone
+changes their prompt:
+
+```bash
+python benches/retrieval.py
+```
+
+Each query carries the patterns any correct source would contain, so the
+headline is simply whether the answer reached the window. It also reports what
+share of the budget went to sources that mention the subject at all.
+
 Quality is scored two ways at once — shingle overlap with each page's own
 article container, and a count of site furniture that reached the output.
 Overlap alone says to switch every threshold off, because the container being

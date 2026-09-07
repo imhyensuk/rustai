@@ -21,6 +21,13 @@ All notable changes to this project are documented here. The format follows
   every correct source on the other scored below 0.10, so a fixed cutoff drops
   the good set and keeps the bad one. The field invited exactly that mistake by
   not saying so.
+- **`benches/retrieval.py` — does the answer reach the context window?** The
+  existing benchmarks measure throughput and extraction; neither says whether
+  the library did its actual job for a question. This one does, with no model
+  and no prompt in the loop, so the number describes rustai rather than
+  whoever wrote the prompt. Each query carries the patterns any correct source
+  would contain. Over nine queries: answer present 96%, 90% of the budget spent
+  on sources that mention the subject, median 3.2s.
 - **`benches/fetch_corpus.py`, so the quality benchmark can actually be run.**
   `quality.py` scores real saved pages, and nothing in the repository fetched
   them — `corpus.py` is the synthetic generator for the throughput benchmark,
