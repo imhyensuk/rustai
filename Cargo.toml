@@ -1,6 +1,6 @@
 [package]
 name         = "rustai-core"
-version      = "0.2.0"
+version      = "0.3.0"
 edition      = "2024"
 rust-version = "1.98"
 description  = "Zero-cost local research pipeline: async search routing, TLS-fingerprint-aware fetching, SIMD DOM denoising and BM25 context slimming for local LLMs."

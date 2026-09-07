@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-07
+
 ### Added
 
 - **`slim` accepts embeddings from a model you already run.** BM25 cannot see
@@ -62,7 +64,6 @@ All notable changes to this project are documented here. The format follows
   every correct source on the other scored below 0.10, so a fixed cutoff drops
   the good set and keeps the bad one. The field invited exactly that mistake by
   not saying so.
-### Added
 
 - **The README now says how this compares, what every call takes, and how each
   benchmark is run.** A comparison section against `trafilatura`, `resiliparse`,
@@ -400,6 +401,7 @@ First release.
   opt-in `nightly-simd` feature. Text scanning in this crate is SIMD-accelerated
   on stable regardless, via `memchr`.
 
-[Unreleased]: https://github.com/imhyensuk/rustai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/imhyensuk/rustai/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/imhyensuk/rustai/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/imhyensuk/rustai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/imhyensuk/rustai/releases/tag/v0.1.0
