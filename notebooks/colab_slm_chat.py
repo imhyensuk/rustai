@@ -29,6 +29,10 @@ CONTEXT_TOKENS = 2048        # SLM에 넣을 근거 예산
 MAX_SOURCES    = 5           # 실제로 읽어올 페이지 수
 MAX_RESULTS    = 15          # 검색이 돌려줄 히트 수 (읽기 전이라 저렴)
 PER_SOURCE_CAP = 700         # 한 페이지가 근거를 독점하지 못하게
+# 이보다 적게 기여한 출처는 버립니다. 인용 번호는 차지하면서 근거는 한 문장도
+# 못 되는 페이지가 생깁니다 -- AccuWeather 의 시간별 날씨는 JS 로 그려져
+# 12토큰을 내놓고, 세 번의 질문에서 매번 출처 목록에 이름만 올렸습니다.
+MIN_SOURCE_TOKENS = 40
 MAX_NEW_TOKENS = 512
 CONTACT_EMAIL  = None        # OpenAlex/Crossref polite pool 용, 선택
 PROVIDERS      = ["duckduckgo", "wikipedia:ko", "wikipedia:en",
@@ -153,15 +157,16 @@ def gather(question: str):
         grouped.setdefault(sel["source"], []).append(sel["unit"])
 
     blocks, cites = [], []
-    for n, meta in enumerate(res.context.sources, start=1):
+    for meta in res.context.sources:
         units = sorted(grouped.get(meta["index"], []))
-        if not units:
+        if not units or meta["tokens"] < MIN_SOURCE_TOKENS:
             continue
         art = res.articles[meta["index"]]
         body = "\n".join(art.units[u].markdown for u in units)
         weighted = sum(s["relevance"] * s["tokens"] for s in res.context.selected
                        if s["source"] == meta["index"])
         rel = weighted / max(meta["tokens"], 1)
+        n = len(cites) + 1
         blocks.append(f"[{n}] {meta['title']}\n{body}")
         cites.append((n, meta["title"], meta["url"], meta["tokens"], rel))
 
@@ -199,18 +204,41 @@ GROUNDED = (
 PLAIN = "당신은 한국어로 답하는 도우미입니다. 아는 대로 간결하게 답하세요."
 
 @torch.inference_mode()
-def generate(messages) -> tuple[str, float, int]:
+def generate(messages, max_new: int = MAX_NEW_TOKENS) -> tuple[str, float, int]:
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     ids = tok(text, return_tensors="pt").to(model.device)
     t0 = time.time()
     out = model.generate(
-        **ids, max_new_tokens=MAX_NEW_TOKENS, do_sample=True,
+        **ids, max_new_tokens=max_new, do_sample=True,
         temperature=0.7, top_p=0.9, repetition_penalty=1.05,
         pad_token_id=(tok.pad_token_id if tok.pad_token_id is not None
                       else tok.eos_token_id),
     )
     new = out[0][ids["input_ids"].shape[1]:]
     return tok.decode(new, skip_special_tokens=True).strip(), time.time() - t0, len(new)
+
+ANAPHORA = ("그것", "그거", "그건", "이것", "이거", "이건", "저것", "저거",
+            "거기", "그건가", "그럼", "그러면", "그래서", "방금", "위에서",
+            "더 자세히", "왜 그런", "어떻게 그런")
+
+def rewrite(previous: str, question: str) -> str:
+    """후속 질문을 혼자서도 뜻이 통하는 검색어로 다시 씁니다.
+
+    앞 질문을 그대로 이어 붙이면 검색이 두 주제를 한꺼번에 찾습니다. 후속
+    질문이 바꾸는 것은 보통 개체 하나이고("그럼 부산은?"), 그 치환은 규칙으로
+    쓰기 어렵습니다. 모델은 이미 여기 있으니 짧게 한 번 물어보는 편이 낫습니다.
+    """
+    out, _, _ = generate([
+        {"role": "system",
+         "content": "검색어를 다시 쓰는 도구입니다. 설명 없이 한 줄만 출력하세요."},
+        {"role": "user",
+         "content": f"이전 질문: {previous}\n후속 질문: {question}\n\n"
+                    "후속 질문을, 이전 질문을 몰라도 뜻이 통하는 검색어 한 줄로 "
+                    "다시 쓰세요."},
+    ], max_new=48)
+    line = out.strip().splitlines()[0].strip(" \"'") if out.strip() else ""
+    # 모델이 설명을 늘어놓거나 빈 줄을 주면 옛 방식으로 되돌립니다.
+    return line if 0 < len(line) <= 60 else f"{previous} {question}"
 
 def rule(title=""):
     print("\n" + (f"── {title} " + "─" * max(0, 68 - len(title))) if title else "─" * 70)
@@ -245,11 +273,8 @@ while True:
     # 후속 질문에만 직전 질문을 붙입니다. 글자 수로 재면 안 됩니다 -- 한국어는
     # 조밀해서 "딥러닝이 뭐야?"가 9글자이고, 길이로 판정하면 완결된 질문에
     # 엉뚱한 앞 질문이 붙어 검색이 통째로 빗나갑니다. 지시어가 있을 때만.
-    ANAPHORA = ("그것", "그거", "그건", "이것", "이거", "이건", "저것", "저거",
-                "거기", "그건가", "그럼", "그러면", "그래서", "방금", "위에서",
-                "더 자세히", "왜 그런", "어떻게 그런")
     follow_up = bool(history) and any(a in q for a in ANAPHORA)
-    query = f"{history[-1]['q']} {q}" if follow_up else q
+    query = rewrite(history[-1]["q"], q) if follow_up else q
 
     print(f"\n[수집 중] {query}")
     try:
@@ -275,10 +300,11 @@ while True:
 
     rule("rustai 근거로")
     prompt = f"다음은 방금 웹에서 수집·정제한 근거입니다.\n\n{g['context']}\n\n질문: {q}"
+    # 대화 이력은 여기 넣지 않습니다. 근거 옆에 자기 옛 답변을 두면 모델이
+    # 근거보다 그쪽을 따릅니다 -- 영하 10도 한파를 묻는 답에 30도 답변의
+    # 자외선 차단제 문장이 한 글자도 다르지 않게 다시 나왔습니다. 대화의
+    # 연속성은 위의 rewrite() 가 검색어 쪽에서 담당합니다.
     answer, dt, n = generate([{"role": "system", "content": GROUNDED},
-                              *[m for h in history[-2:] for m in
-                                ({"role": "user", "content": h["q"]},
-                                 {"role": "assistant", "content": h["a"]})],
                               {"role": "user", "content": prompt}])
     print(answer)
     print(f"\n  ({dt:.1f}초 · {n}토큰 · {n/dt:.0f} tok/s)")
