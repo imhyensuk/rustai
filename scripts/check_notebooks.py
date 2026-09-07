@@ -130,24 +130,24 @@ def blocks(path: pathlib.Path):
     valid on its own, while the concatenation of several need not be.
     """
     if path.suffix == ".ipynb":
-        cells = [c for c in json.loads(path.read_text())["cells"]
+        cells = [c for c in json.loads(path.read_text(encoding="utf-8"))["cells"]
                  if c["cell_type"] == "code"]
         for number, cell in enumerate(cells, start=1):
-            yield f"셀 {number}", "".join(cell["source"])
+            yield f"cell {number}", "".join(cell["source"])
         return
     # ```python … ``` only. A bare fence is usually shell or output.
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for number, match in enumerate(
         re.finditer(r"^```(?:python|py)\n(.*?)^```", text, re.M | re.S), start=1
     ):
         line = text[: match.start()].count("\n") + 1
-        yield f"{line}행의 블록 {number}", match.group(1)
+        yield f"block {number} at line {line}", match.group(1)
 
 
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which not in ("all", "notebooks", "docs"):
-        sys.exit(f"쓰임: {sys.argv[0]} [all|notebooks|docs]")
+        sys.exit(f"usage: {sys.argv[0]} [all|notebooks|docs]")
     paths = []
     if which in ("all", "notebooks"):
         paths += sorted(pathlib.Path("notebooks").glob("*.ipynb"))
@@ -155,8 +155,8 @@ def main() -> None:
         paths += [p for p in (pathlib.Path("README.md"), pathlib.Path("CONTRIBUTING.md"))
                   if p.exists()]
     if not paths:
-        sys.exit("검사할 노트북이나 문서가 없습니다")
-    print(f"rustai {rustai.__version__} 에 대고 검사합니다\n")
+        sys.exit("nothing to check")
+    print(f"checking against rustai {rustai.__version__}\n")
 
     problems = 0
     for path in paths:
@@ -181,11 +181,11 @@ def main() -> None:
                 # body -- which is fine to show and impossible to parse. A
                 # notebook cell is a whole program and has no such excuse.
                 if path.suffix == ".ipynb":
-                    print(f"  {label}: 파싱 실패")
+                    print(f"  {label}: could not be parsed")
                     problems += 1
         for name, keywords, line in found:
             if not hasattr(rustai, name):
-                print(f"  {line:>4}행  rustai.{name} 이 없습니다")
+                print(f"  line {line}: rustai.{name} does not exist")
                 problems += 1
                 continue
             probe = PROBES.get(name)
@@ -194,13 +194,13 @@ def main() -> None:
             try:
                 probe(keywords)
             except TypeError as error:
-                print(f"  {line:>4}행  rustai.{name}({', '.join(keywords)}) → {error}")
+                print(f"  line {line}: rustai.{name}({', '.join(keywords)}) -> {error}")
                 problems += 1
             except KeyError as error:
                 # Either the argument does not exist, or it does and this
                 # script has never seen it. Both need a human, so say both.
-                print(f"  {line:>4}행  rustai.{name}(… {error} …) — 그런 인자가 "
-                      f"없거나, 새 인자라면 SAMPLES 에 견본값을 넣으세요")
+                print(f"  line {line}: rustai.{name}(... {error} ...) - no such argument, "
+                      f"or a new one that needs a value in SAMPLES")
                 problems += 1
             except Exception:
                 # Anything but TypeError means the signature was accepted and
@@ -209,8 +209,8 @@ def main() -> None:
 
     print()
     if problems:
-        sys.exit(f"{problems}건. 문서 예제는 릴리스된 rustai 에서 돌아야 합니다.")
-    print("문서와 노트북의 rustai 호출이 모두 이 버전에서 동작합니다.")
+        sys.exit(f"{problems} problem(s). Examples must run on the rustai they target.")
+    print("every rustai call in the docs and notebooks works on this version.")
 
 
 if __name__ == "__main__":

@@ -92,7 +92,7 @@ def main() -> None:
     compare = "--vs-trafilatura" in sys.argv
     directory = pathlib.Path(argv[0] if argv else "/tmp/rustai-pages")
     urls_file = directory / "urls.json"
-    urls = json.loads(urls_file.read_text()) if urls_file.exists() else {}
+    urls = json.loads(urls_file.read_text(encoding="utf-8")) if urls_file.exists() else {}
 
     tools = list(extractors(compare))
     scored = {name: [] for name, _ in tools}

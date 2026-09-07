@@ -74,6 +74,14 @@ All notable changes to this project are documented here. The format follows
   the five scripts in `benches/`, each with the corpus its numbers came from,
   since the synthetic corpus reads 25× faster per document than real pages and
   quoting the flattering one would be a lie by omission.
+- **`scripts/check_notebooks.py` reads UTF-8 explicitly and reports in
+  English.** Added to the Windows CI matrix it failed both Python versions
+  while every test passed: it printed its progress in Korean, and a Windows
+  console is not UTF-8, so the run ended in `UnicodeEncodeError` instead of a
+  result. Reading was the same bug one step later — `Path.read_text()` uses the
+  locale encoding, and the README it reads is full of Korean. Output now
+  matches every other script in `scripts/`, which removes the hazard rather
+  than working around it, and `benches/quality.py` had the same latent read.
 - **`scripts/check_notebooks.py` now checks Markdown too, and calls the
   functions rather than trusting their names.** crates.io and PyPI snapshot the
   README at publish time and neither lets you edit it, so a broken example is
