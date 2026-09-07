@@ -60,10 +60,13 @@ against not retrieving is a library nobody has measured.
 
 [`colab_speed_benchmark.ipynb`](notebooks/colab_speed_benchmark.ipynb) times this
 library against five other extractors and three HTTP clients on the same pages, in
-one cell. It does not flatter us: `resiliparse`, a C++ extraction library, is faster
-on that axis, and the notebook says so before you run it. It also separates parsers
-from extractors and prints output sizes, because comparing the speed of two things
-that are not doing the same work is how most scraping benchmarks mislead.
+one cell. It does not flatter us: `resiliparse`, a C++ extraction library, extracts
+2.4× faster on an M1 — and 5% slower on Colab's x86 pair, which is why the notebook
+tells you to run it on your own machine rather than trust either number. It also
+separates parsers from extractors and prints output sizes, because comparing the
+speed of two things that are not doing the same work is how most scraping
+benchmarks mislead, and it lists rustai twice on the network stage, obeying and
+ignoring `Crawl-delay`, since it is the only client there that reads that line.
 
 [`colab_quickstart.ipynb`](notebooks/colab_quickstart.ipynb) walks the same
 ground more slowly, and [`colab_oneshot.ipynb`](notebooks/colab_oneshot.ipynb)
