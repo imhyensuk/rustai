@@ -174,6 +174,38 @@ class Article:
     def meta(self) -> Meta:
         """Metadata from `<head>`."""
         ...
+    def chunks(
+        self,
+        *,
+        target_tokens: int = 512,
+        overlap_tokens: int = 64,
+        min_tokens: int = 24,
+    ) -> list[dict]:
+        """Group the units into pieces an embedding model will accept.
+
+        A `Unit` is one block — a paragraph, a list item, a heading. That is
+        the grain ranking wants and the wrong one for a vector store: on MDN's
+        `Promise` reference the median unit is 37 tokens and a third are under
+        30, so embedding units directly gives you 125 vectors that each know
+        almost nothing. This walks them in order and groups them up to
+        `target_tokens`, starting a new chunk at each heading so a chunk opens
+        with the thing that says what it is about.
+
+        `overlap_tokens` repeats whole units from the previous chunk's tail, so
+        an answer that straddles a boundary is retrievable from either side. A
+        unit longer than `target_tokens` is emitted whole rather than cut
+        mid-sentence, and an article that would otherwise produce nothing gets
+        one chunk anyway — a short page is still a source.
+
+        Returns dicts, ready to hand to a vector store:
+
+        ```text
+        for c in article.chunks():
+            store.add(id=f"{c['url']}#{c['index']}", text=c["text"],
+                      metadata={"title": c["title"], "url": c["url"]})
+        ```
+        """
+        ...
     @property
     def units(self) -> list[Unit]:
         """Rankable blocks."""
@@ -524,6 +556,24 @@ def research(
 
     `max_tokens_per_source` caps how much any one page may contribute; see
     `Client` for when that is worth doing.
+    """
+    ...
+def chunk_many(
+    articles: Sequence[Article],
+    *,
+    target_tokens: int = 512,
+    overlap_tokens: int = 64,
+    min_tokens: int = 24,
+) -> list[dict]:
+    """Chunk many articles at once, in parallel across the rayon pool.
+
+    The batch form of `Article.chunks`. Chunking is cheap per article but a
+    crawl produces thousands, and the GIL is released for the whole call, so a
+    list costs roughly one article's wall time on a multi-core machine.
+
+    Returns one flat list: chunks carry their own `url`, so which article a
+    chunk came from survives the flattening, which is the shape a vector store
+    wants anyway.
     """
     ...
 def count_tokens(text: str) -> int:

@@ -181,9 +181,15 @@ impl<'d, 'a> Writer<'d, 'a> {
             let inline = self.render_children_inline(id);
             let t = text::normalize_ws(&inline);
             if !t.is_empty() {
-                self.push_heading(level, &t);
+                // The plain form has to lose the link syntax, the same as a
+                // paragraph's does. Modern documentation wraps every heading
+                // in its own anchor, so leaving it in puts the whole URL into
+                // the text that BM25 scores and an embedding model reads --
+                // and into every breadcrumb built from the heading path.
+                let plain = strip_markdown(&t);
+                self.push_heading(level, &plain);
                 let md = format!("{} {}", "#".repeat(level as usize), t);
-                self.emit(UnitKind::Heading, level, t, md);
+                self.emit(UnitKind::Heading, level, plain, md);
             }
             return;
         }
@@ -722,6 +728,21 @@ mod tests {
     fn wrap_keeps_outer_spacing() {
         assert_eq!(wrap(" hi ", "**"), " **hi** ");
         assert_eq!(wrap("   ", "**"), "");
+    }
+
+    #[test]
+    fn a_heading_wrapped_in_its_own_anchor_has_plain_text() {
+        // MDN, docs.rs and every MkDocs site render headings this way.
+        let html = concat!(
+            "<html><body><article><h2><a href=\"https://d.dev/a/b#sec\">Section</a></h2>",
+            "<p>Body text long enough to survive the block gate here.</p></article></body></html>"
+        );
+        let article = crate::parse::extract(html, Some("https://d.dev/a/b")).unwrap();
+        let heading = article.units.iter().find(|u| u.kind == UnitKind::Heading).unwrap();
+        assert_eq!(heading.text, "Section");
+        assert!(heading.markdown.contains("https://d.dev/a/b#sec"), "markdown keeps the link");
+        let below = article.units.iter().find(|u| u.kind == UnitKind::Paragraph).unwrap();
+        assert_eq!(below.heading_path, vec!["Section"], "breadcrumbs carry no URL");
     }
 
     #[test]

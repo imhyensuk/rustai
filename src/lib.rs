@@ -94,6 +94,7 @@
 
 #![deny(missing_docs)]
 
+pub mod chunk;
 pub mod denoise;
 pub mod error;
 pub mod http;

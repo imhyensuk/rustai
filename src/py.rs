@@ -15,6 +15,7 @@ use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+use crate::chunk::ChunkConfig;
 use crate::denoise::{DenoiseConfig, DenoiseStats};
 use crate::error::Error;
 use crate::http::{FetchConfig, Impersonate, Page};
@@ -308,6 +309,51 @@ pub struct PyArticle {
 
 #[pymethods]
 impl PyArticle {
+    /// Group the units into pieces an embedding model will accept.
+    ///
+    /// A `Unit` is one block — a paragraph, a list item, a heading. That is
+    /// the grain ranking wants and the wrong one for a vector store: on MDN's
+    /// `Promise` reference the median unit is 37 tokens and a third are under
+    /// 30, so embedding units directly gives you 125 vectors that each know
+    /// almost nothing. This walks them in order and groups them up to
+    /// `target_tokens`, starting a new chunk at each heading so a chunk opens
+    /// with the thing that says what it is about.
+    ///
+    /// `overlap_tokens` repeats whole units from the previous chunk's tail, so
+    /// an answer that straddles a boundary is retrievable from either side. A
+    /// unit longer than `target_tokens` is emitted whole rather than cut
+    /// mid-sentence, and an article that would otherwise produce nothing gets
+    /// one chunk anyway — a short page is still a source.
+    ///
+    /// Returns dicts, ready to hand to a vector store:
+    ///
+    /// ```text
+    /// for c in article.chunks():
+    ///     store.add(id=f"{c['url']}#{c['index']}", text=c["text"],
+    ///               metadata={"title": c["title"], "url": c["url"]})
+    /// ```
+    #[pyo3(signature = (*, target_tokens = 512, overlap_tokens = 64, min_tokens = 24))]
+    fn chunks(
+        &self,
+        py: Python<'_>,
+        target_tokens: usize,
+        overlap_tokens: usize,
+        min_tokens: usize,
+    ) -> PyResult<Py<PyAny>> {
+        if target_tokens == 0 {
+            return Err(PyValueError::new_err("target_tokens must be greater than 0"));
+        }
+        if overlap_tokens >= target_tokens {
+            return Err(PyValueError::new_err(
+                "overlap_tokens must be smaller than target_tokens, or every \
+                 chunk repeats the last one and chunking never advances",
+            ));
+        }
+        let cfg = ChunkConfig { target_tokens, overlap_tokens, min_tokens };
+        let out = py.detach(|| crate::chunk::chunk(&self.inner, &cfg));
+        to_dict(py, &out)
+    }
+
     /// Source URL.
     #[getter]
     fn url(&self) -> Option<&str> {
@@ -965,6 +1011,39 @@ fn extract(
     Ok(PyArticle { inner })
 }
 
+/// Chunk many articles at once, in parallel across the rayon pool.
+///
+/// The batch form of `Article.chunks`. Chunking is cheap per article but a
+/// crawl produces thousands, and the GIL is released for the whole call, so a
+/// list costs roughly one article's wall time on a multi-core machine.
+///
+/// Returns one flat list: chunks carry their own `url`, so which article a
+/// chunk came from survives the flattening, which is the shape a vector store
+/// wants anyway.
+#[pyfunction]
+#[pyo3(signature = (articles, *, target_tokens = 512, overlap_tokens = 64, min_tokens = 24))]
+fn chunk_many(
+    py: Python<'_>,
+    articles: Vec<PyRef<'_, PyArticle>>,
+    target_tokens: usize,
+    overlap_tokens: usize,
+    min_tokens: usize,
+) -> PyResult<Py<PyAny>> {
+    if target_tokens == 0 {
+        return Err(PyValueError::new_err("target_tokens must be greater than 0"));
+    }
+    if overlap_tokens >= target_tokens {
+        return Err(PyValueError::new_err("overlap_tokens must be smaller than target_tokens"));
+    }
+    let cfg = ChunkConfig { target_tokens, overlap_tokens, min_tokens };
+    let owned: Vec<Article> = articles.iter().map(|a| a.inner.clone()).collect();
+    let out = py.detach(|| {
+        use rayon::prelude::*;
+        owned.par_iter().flat_map(|a| crate::chunk::chunk(a, &cfg)).collect::<Vec<_>>()
+    });
+    to_dict(py, &out)
+}
+
 /// Denoise many HTML strings at once, in parallel across the rayon pool.
 ///
 /// This is the batch form of [`extract`]. Parsing is CPU-bound and per-document
@@ -1150,6 +1229,7 @@ pub fn rustai_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(extract_many, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_many, m)?)?;
     m.add_function(wrap_pyfunction!(slim, m)?)?;
     m.add_function(wrap_pyfunction!(research, m)?)?;
     m.add_function(wrap_pyfunction!(count_tokens, m)?)?;

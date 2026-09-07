@@ -8,6 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`Article.chunks()` and `rustai.chunk_many()`, for putting this in a vector
+  store.** A `Unit` is one block, which is the grain ranking wants and the
+  wrong one for embedding: on MDN's `Promise` reference the median unit is 37
+  tokens and 36% are under 30, so embedding units directly gives 125 vectors
+  that each know almost nothing. Chunking groups them to a target size,
+  starting a new chunk at each heading so a chunk opens with the thing that
+  says what it is about, and repeating whole units across the boundary so an
+  answer that straddles one stays retrievable from either side. The same page
+  becomes 26 chunks with a median of 409 tokens. A unit longer than the target
+  is emitted whole rather than cut mid-sentence, and an article that would
+  otherwise produce nothing gets one chunk anyway — a short page is still a
+  source. `chunk_many` releases the GIL and spreads across the rayon pool.
+- **`benches/tokens.py` — what a question costs, and whether the answer
+  survives.** Five stages, each where somebody's pipeline actually stops.
+  Averaged over seven queries: raw HTML 233,184 tokens, a parser's text dump
+  65,071, a real extractor 18,968, every unit this library kept 26,058, and
+  the ranked context 1,884 — 0.8% of the raw, and the answer present in all
+  seven at every stage. Token counts alone would reward throwing everything
+  away, so each stage is checked for patterns any correct source would
+  contain.
+
 - **`notebooks/colab_slm_chat.ipynb` — the library used the way it is meant to
   be.** One Colab cell on a T4: it caches a 2–3B Korean-capable model to Google
   Drive, loads it, and runs a grounded conversation where the context comes from
@@ -152,6 +173,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A heading's plain text kept the Markdown link wrapping it.** `Unit.text`
+  is documented as plain text and a paragraph's is, but a heading's was the
+  rendered Markdown — and modern documentation wraps every heading in its own
+  anchor, so `[Description](https://…#description)` went into the text that
+  BM25 scores, into every heading breadcrumb, and now into everything an
+  embedding model would read. Extraction F1 over twenty pages goes 71.7% →
+  72.6% and precision 83.9% → 85.5%, which is what happens when a URL stops
+  counting as extracted text.
 - **A `<` followed by punctuation opened a phantom element, losing the rest of
   the document.** After `<`, HTML opens an element only for a letter, an end
   tag for `/` and a declaration for `!`; `?` starts a bogus comment, discarded

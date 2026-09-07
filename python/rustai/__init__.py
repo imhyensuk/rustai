@@ -29,6 +29,14 @@ collected as link inventories rather than prose, and work as a source::
 
     client = rustai.Client(providers=["index:https://news.ycombinator.com/"])
 
+For a vector store, chunk the articles rather than embedding units directly --
+a unit is one paragraph and a third of them are under 30 tokens::
+
+    for chunk in article.chunks(target_tokens=512, overlap_tokens=64):
+        store.add(chunk["text"], metadata=chunk)
+
+    chunks = rustai.chunk_many(articles)      # parallel across every core
+
 Scholarly sources are first-class alongside web search::
 
     client = rustai.Client(
@@ -68,6 +76,7 @@ from ._rustai import (
     Unit,
     __version__,
     canonical_url,
+    chunk_many,
     count_tokens,
     density,
     extract,
@@ -99,6 +108,7 @@ __all__ = [
     "Unit",
     "__version__",
     "canonical_url",
+    "chunk_many",
     "count_tokens",
     "density",
     "extract",
