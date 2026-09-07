@@ -513,6 +513,43 @@ like real ones: heavy chrome, nested wrappers, ad slots, a sidebar, a script
 blob. Synthetic so the benchmark is deterministic and redistributable — the
 chrome-to-content ratio is what an extractor is tested on, not raw size.
 
+### What a question costs
+
+```bash
+python benches/tokens.py
+```
+
+Five stages, each where somebody's pipeline actually stops, averaged over seven
+questions:
+
+```
+raw HTML     233,184 tokens   answer present 100%
+parsed text   65,071  (27.9%)                100%
+extracted     18,968   (8.1%)                100%
+rustai all    26,058  (11.2%)                100%
+rustai slim    1,884   (0.8%)                100%
+```
+
+A dedicated extractor gets you to 8%. Ranking and a token budget get you to
+0.8%, a tenth of that, with the answer still present in every question — which
+is checked, because a benchmark counting only tokens would reward returning
+nothing. On a 3B model with a 32k window the raw pages for "딥러닝이 뭐야?"
+do not fit at all, at 593,439 tokens; the context that answers it is 1,627.
+
+### Chunks for a vector store
+
+```python
+for chunk in article.chunks(target_tokens=512, overlap_tokens=64):
+    store.add(chunk["text"], metadata=chunk)
+
+chunks = rustai.chunk_many(articles)      # parallel across every core
+```
+
+A `Unit` is one block, which is the grain ranking wants and the wrong one to
+embed: on MDN's `Promise` reference the median unit is 37 tokens and a third
+are under 30. Grouped, the same page is 26 chunks with a median of 409. Each
+carries its URL, title and heading path, so a retrieved chunk can cite itself.
+
 Extraction *quality* needs the opposite corpus — real pages, since synthetic
 ones only contain the mess this repository thought to write:
 

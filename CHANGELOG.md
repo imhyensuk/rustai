@@ -35,7 +35,11 @@ All notable changes to this project are documented here. The format follows
   pages fetched moments earlier. Every question is answered twice by the same
   model, with and without that context, because the fourth goal of this project
   — that the output is useful to a small local model — had never been measured,
-  only asserted.
+  only asserted. It now prices every question as it goes: raw HTML, extracted,
+  and the context actually sent, against the model's own window. For "딥러닝이
+  뭐야?" that reads 593,439 → 77,957 → 1,627, and the raw pages do not fit in
+  a 32k window at all, which is the difference between compression as a
+  convenience and as the thing that makes the question answerable.
 - **`Context.selected` now says its scores are not comparable across queries.**
   They rank units within one query; BM25 scales with how rare the query's terms
   are. On two live queries an off-topic encyclopedia article scored 0.22 while

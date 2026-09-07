@@ -111,8 +111,9 @@ if MODELS[MODEL_KEY]["load_4bit"]:
 tok = AutoTokenizer.from_pretrained(local, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(local, trust_remote_code=True, **kwargs)
 model.eval()
+WINDOW = getattr(model.config, "max_position_embeddings", 0) or 0
 print(f"  로드 완료 · {time.time() - t0:.0f}초 · "
-      f"VRAM {torch.cuda.memory_allocated() / 1e9:.1f}GB")
+      f"VRAM {torch.cuda.memory_allocated() / 1e9:.1f}GB · 문맥 창 {WINDOW:,}토큰")
 
 # --------------------------------------------------- 4. rustai 파이프라인
 client = rustai.Client(
@@ -140,30 +141,42 @@ live_client = rustai.Client(
 )
 
 def gather(question: str):
-    """검색 → 읽기 → 정제 → 압축. 번호가 매겨진 근거와 계측치를 돌려줍니다."""
+    """검색 → 읽기 → 정제 → 압축. 단계마다 토큰을 세어 함께 돌려줍니다.
+
+    research() 한 번으로 끝낼 수도 있지만, 그러면 원본 HTML 이 몇 토큰이었는지
+    알 수 없습니다. 이 라이브러리의 값어치가 바로 그 차이라서 단계를 펼칩니다.
+    """
     # 백과사전은 "무엇인가"에 강하고 "지금 얼마인가"에 무력합니다. 그런데 그
     # 문서들은 길고 깨끗한 산문이라 슬리머의 예산을 독차지합니다 -- 측정해 보면
     # 날씨 사이트는 JS 로 그려져 36토큰을 내놓고, 엉뚱하게 걸려든 인물 문서는
     # 6,044토큰을 내놓습니다. 실시간 수치를 묻는 질문에서는 빼는 편이 낫습니다.
     lookup = any(k in question for k in LOOKUP)
     pipe = live_client if lookup else client
+
     t0 = time.time()
-    res = pipe.research(question, max_sources=MAX_SOURCES)
+    hits = pipe.search(question)[:MAX_SOURCES]
+    pages = pipe.fetch([h.url for h in hits])
+    articles = [a for a in (rustai.extract(p.body, url=p.url) for p in pages) if a.units]
+    ctx = rustai.slim(question, articles, max_tokens=CONTEXT_TOKENS,
+                      max_tokens_per_source=PER_SOURCE_CAP)
     elapsed = time.time() - t0
 
-    # context.selected 는 인덱스를 담습니다: source→articles, unit→그 글의 units.
+    # 단계별 토큰. 이것이 "절약했다"는 주장의 근거입니다.
+    raw = sum(rustai.count_tokens(p.body) for p in pages)
+    kept = sum(rustai.count_tokens(a.markdown) for a in articles)
+
     grouped = {}
-    for sel in res.context.selected:
+    for sel in ctx.selected:
         grouped.setdefault(sel["source"], []).append(sel["unit"])
 
     blocks, cites = [], []
-    for meta in res.context.sources:
+    for meta in ctx.sources:
         units = sorted(grouped.get(meta["index"], []))
         if not units or meta["tokens"] < MIN_SOURCE_TOKENS:
             continue
-        art = res.articles[meta["index"]]
+        art = articles[meta["index"]]
         body = "\n".join(art.units[u].markdown for u in units)
-        weighted = sum(s["relevance"] * s["tokens"] for s in res.context.selected
+        weighted = sum(s["relevance"] * s["tokens"] for s in ctx.selected
                        if s["source"] == meta["index"])
         rel = weighted / max(meta["tokens"], 1)
         n = len(cites) + 1
@@ -176,13 +189,13 @@ def gather(question: str):
         "context": context,
         "cites": cites,
         "seconds": elapsed,
-        # 실제로 프롬프트에 들어가는 문자열 기준. context.tokens 는 슬리머가
-        # 고른 유닛 전체를 세므로, 여기서 재조립한 것과 조금 어긋납니다.
         "tokens": rustai.count_tokens(context),
-        "considered": res.context.units_considered,
-        "hits": len(res.results),
-        "read": len(res.articles),
-        "failures": res.failures,
+        "raw_tokens": raw,
+        "kept_tokens": kept,
+        "considered": ctx.units_considered,
+        "hits": len(hits),
+        "read": len(articles),
+        "failures": [],
         "lookup": lookup,
     }
 
@@ -285,9 +298,14 @@ while True:
     print(f"  히트 {g['hits']}개 → {g['read']}개 읽음 → "
           f"{g['considered']}개 블록 중 {g['tokens']}토큰 선별 · {g['seconds']:.1f}초"
           + ("  [실시간 질문 — 백과사전 제외]" if g["lookup"] else ""))
-    if g["failures"]:
-        for stage, msg in g["failures"][:3]:
-            print(f"  · 건너뜀 {stage}: {msg[:60]}")
+    raw, kept, ctx_tokens = g["raw_tokens"], g["kept_tokens"], g["tokens"]
+    if raw:
+        print(f"  토큰  원본 HTML {raw:,} → 추출 {kept:,} → 문맥 {ctx_tokens:,}"
+              f"   ({1 - ctx_tokens / raw:.1%} 절감, {raw / max(ctx_tokens, 1):.0f}배)")
+        if WINDOW:
+            over = "들어가지 않습니다" if raw > WINDOW else f"{raw / WINDOW:.0%} 사용"
+            print(f"        모델 창 {WINDOW:,}토큰 — 원본은 {over}, "
+                  f"문맥은 {ctx_tokens / WINDOW:.1%} 사용")
     if not g["cites"]:
         print("  쓸 만한 근거를 찾지 못했습니다."); continue
 
