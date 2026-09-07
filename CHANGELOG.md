@@ -21,6 +21,13 @@ All notable changes to this project are documented here. The format follows
   every correct source on the other scored below 0.10, so a fixed cutoff drops
   the good set and keeps the bad one. The field invited exactly that mistake by
   not saying so.
+- **`benches/quality.py --vs-trafilatura` scores a second extractor on the same
+  pages.** A number is not good or bad on its own. trafilatura wins on this
+  corpus, 75.1% F1 against 71.7%, and two thirds of the difference is Wikipedia
+  reference lists that it keeps and this library drops — right for recall
+  against a page's own container, wrong for a token budget being spent on an
+  answer. The other third is prose, and that part is a real deficit. rustai
+  extracts the same twenty pages in 327ms against 3,146ms.
 - **`benches/retrieval.py` — does the answer reach the context window?** The
   existing benchmarks measure throughput and extraction; neither says whether
   the library did its actual job for a question. This one does, with no model
