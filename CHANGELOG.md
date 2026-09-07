@@ -23,6 +23,15 @@ All notable changes to this project are documented here. The format follows
   not saying so.
 ### Added
 
+- **`scripts/check_notebooks.py`, because I shipped this bug twice.** The
+  notebooks are for Colab, Colab installs from PyPI, and twice a notebook went
+  out calling an argument that existed only on `main` — `max_results`, then
+  `respect_crawl_delay` — so the cell died on the first line that touched the
+  library. The script reads every `rustai.<name>(...)` out of every notebook
+  and checks the name and its keywords against whatever rustai is installed;
+  CI now runs it against the published package rather than the checkout. Calls
+  guarded by `try` / `except TypeError` are skipped, which is how a notebook
+  should reach for something newer than the floor it supports.
 - **`respect_crawl_delay` is now settable from Python.** It existed in the Rust
   config and nowhere else, so a Python caller could neither turn it off nor
   discover why a fetch had stalled. A site may publish a `Crawl-delay` in its

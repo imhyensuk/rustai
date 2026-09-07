@@ -291,16 +291,28 @@ if NET_ENABLED:
     # 가 robots.txt 에서 요청 간 15초를 요구하므로, 같은 클라이언트로 두 번째
     # arXiv 요청을 보내면 15초를 기다립니다 -- 느린 것이 아니라 시킨 대로 한
     # 것입니다. 두 줄을 나란히 두어 그 값이 얼마인지 보이게 합니다.
-    rude_client = rustai.Client(timeout=30.0, concurrency=16,
-                                respect_crawl_delay=False)
+    # `respect_crawl_delay` 는 0.2.0 이후에 생겼습니다. 없는 버전에서는 매번
+    # 새 Client 를 만들어 같은 효과를 냅니다 -- 방문 기록이 없으니 기다릴
+    # 대상도 없습니다. 어느 쪽을 썼는지는 표에 찍힙니다.
+    try:
+        rude_client = rustai.Client(timeout=30.0, concurrency=16,
+                                    respect_crawl_delay=False)
+        rude_label = "rustai (Crawl-delay 무시 — 아래와 같은 조건)"
 
-    def by_rustai_rude():
-        pages = rude_client.fetch(targets)
-        return len(pages), sum(len(page.body.encode()) for page in pages)
+        def by_rustai_rude():
+            pages = rude_client.fetch(targets)
+            return len(pages), sum(len(page.body.encode()) for page in pages)
+    except TypeError:
+        rude_label = f"rustai (매번 새 Client — {rustai.__version__} 에는 손잡이 없음)"
+
+        def by_rustai_rude():
+            fresh = rustai.Client(timeout=30.0, concurrency=16)
+            pages = fresh.fetch(targets)
+            return len(pages), sum(len(page.body.encode()) for page in pages)
 
     CLIENTS = [
         ("rustai (Crawl-delay 준수 — arXiv 가 15초 요구)", by_rustai),
-        ("rustai (Crawl-delay 무시 — 아래와 같은 조건)", by_rustai_rude),
+        (rude_label, by_rustai_rude),
         ("requests 순차", by_requests),
         ("httpx 비동기", by_httpx),
         ("aiohttp 비동기", by_aiohttp),

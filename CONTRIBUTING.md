@@ -47,6 +47,23 @@ pytest --network
   are the reason this library is safe to hand to someone. Making them
   configurable is fine; making them default-off is not.
 
+## Notebooks
+
+They are for Colab, and Colab installs from PyPI. Writing one against this
+checkout ships a cell that dies on the first line touching the library, in
+front of whoever trusted it — which has happened twice, once for `max_results`
+and once for `respect_crawl_delay`. Check against the published package:
+
+```bash
+python3 -m venv /tmp/released
+/tmp/released/bin/pip install rustai
+/tmp/released/bin/python scripts/check_notebooks.py
+```
+
+CI runs the same thing. To use something newer than the released floor, guard
+it with `try` / `except TypeError` and fall back — the checker skips calls
+inside such a block, since that is the honest way to reach forward.
+
 ## Benchmarks
 
 Throughput, against a synthetic corpus so the numbers are deterministic:
