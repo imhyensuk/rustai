@@ -242,6 +242,17 @@ fn holds_mostly_code(doc: &Doc<'_>, id: Id) -> bool {
     in_code * 2 >= text
 }
 
+/// Did the page itself mark this node invisible? Inline rendering asks too:
+/// KaTeX puts an `aria-hidden` copy of every formula inside the paragraph.
+pub(crate) fn is_hidden(doc: &Doc<'_>, id: Id) -> bool {
+    doc.attr(id, "hidden").is_some()
+        || doc.attr(id, "aria-hidden").as_deref() == Some("true")
+        || doc.attr(id, "style").is_some_and(|s| {
+            let s = s.replace(' ', "").to_ascii_lowercase();
+            s.contains("display:none") || s.contains("visibility:hidden")
+        })
+}
+
 /// Is this node boilerplate that should never reach the Markdown writer?
 pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     let name = doc.tag_name(id);
@@ -257,13 +268,7 @@ pub(crate) fn is_noise(doc: &Doc<'_>, id: Id, cfg: &DenoiseConfig) -> bool {
     if !cfg.keep_tables && name == "table" {
         return true;
     }
-    if doc.attr(id, "hidden").is_some()
-        || doc.attr(id, "aria-hidden").as_deref() == Some("true")
-        || doc.attr(id, "style").is_some_and(|s| {
-            let s = s.replace(' ', "").to_ascii_lowercase();
-            s.contains("display:none") || s.contains("visibility:hidden")
-        })
-    {
+    if is_hidden(doc, id) {
         return true;
     }
     // Past this point every rule is a heuristic about *where* content usually

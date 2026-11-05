@@ -513,7 +513,9 @@ impl<'d, 'a> Writer<'d, 'a> {
             Some(tl::Node::Comment(_)) | None => String::new(),
             Some(tl::Node::Tag(tag)) => {
                 let name = tag.name().as_utf8_str().to_ascii_lowercase();
-                if crate::denoise::DROP_TAGS.contains(&name.as_str()) {
+                if crate::denoise::DROP_TAGS.contains(&name.as_str())
+                    || crate::denoise::is_hidden(self.doc, id)
+                {
                     return String::new();
                 }
                 match name.as_str() {
@@ -550,10 +552,52 @@ impl<'d, 'a> Writer<'d, 'a> {
                         if inner.is_empty() { inner } else { format!("`{inner}`") }
                     }
                     "sup" => self.render_superscript(id),
+                    "math" => self.render_math(id),
                     _ => self.render_children_inline(id),
                 }
             }
         }
+    }
+
+    /// A `<math>` element, once. KaTeX and MathJax keep the TeX source in an
+    /// `<annotation>`; that is preferred, because `(2x+3)^5` keeps the exponent
+    /// that the flattened MathML text `(2x+3)5` loses. Without one, the MathML
+    /// text is read, minus any annotation.
+    fn render_math(&self, id: Id) -> String {
+        let nodes = self.doc.descendants(id);
+        let tex = nodes.iter().copied().find(|&d| {
+            self.doc.tag_name(d) == "annotation"
+                && self
+                    .doc
+                    .attr(d, "encoding")
+                    .is_some_and(|e| e.eq_ignore_ascii_case("application/x-tex"))
+        });
+        if let Some(a) = tex {
+            let src = text::normalize_ws(&self.doc.raw_text(a));
+            return if src.is_empty() { src } else { format!("${}$", escape_inline(&src)) };
+        }
+        let mut buf = String::new();
+        for &d in &nodes {
+            if let Some(tl::Node::Raw(bytes)) = self.doc.node(d)
+                && !self.inside_annotation(d, id)
+            {
+                buf.push_str(&decode_entities(&bytes.as_utf8_str()));
+            }
+        }
+        escape_inline(&text::normalize_ws(&buf))
+    }
+
+    fn inside_annotation(&self, mut id: Id, math: Id) -> bool {
+        while let Some(p) = self.doc.parent(id) {
+            if p == math {
+                return false;
+            }
+            if matches!(self.doc.tag_name(p), "annotation" | "annotation-xml") {
+                return true;
+            }
+            id = p;
+        }
+        false
     }
 
     /// `<sup>` is two unrelated things wearing one tag.
@@ -681,11 +725,15 @@ pub(crate) fn strip_markdown(s: &str) -> String {
     let mut in_link_text = false;
     while let Some(c) = chars.next() {
         match c {
-            '\\' => {
-                if let Some(n) = chars.next() {
-                    out.push(n);
+            // CommonMark lets a backslash escape ASCII punctuation only, so the
+            // `\frac` of a TeX formula keeps its backslash.
+            '\\' => match chars.peek() {
+                Some(n) if n.is_ascii_punctuation() => {
+                    out.push(*n);
+                    chars.next();
                 }
-            }
+                _ => out.push('\\'),
+            },
             '[' => in_link_text = true,
             ']' => {
                 in_link_text = false;
@@ -743,6 +791,49 @@ mod tests {
         assert!(heading.markdown.contains("https://d.dev/a/b#sec"), "markdown keeps the link");
         let below = article.units.iter().find(|u| u.kind == UnitKind::Paragraph).unwrap();
         assert_eq!(below.heading_path, vec!["Section"], "breadcrumbs carry no URL");
+    }
+
+    /// A paragraph's plain text, from the first paragraph unit of `body`.
+    fn paragraph_text(body: &str) -> String {
+        let html = format!("<html><body><article>{body}</article></body></html>");
+        let article = crate::parse::extract(&html, Some("https://m.dev/x")).unwrap();
+        article.units.iter().find(|u| u.kind == UnitKind::Paragraph).unwrap().text.clone()
+    }
+
+    #[test]
+    fn katex_math_is_kept_once_as_its_tex_source() {
+        // KaTeX writes every formula three times: MathML for screen readers,
+        // the TeX source in an <annotation>, and an aria-hidden copy to look at.
+        let text = paragraph_text(concat!(
+            "<p>Differentiate <span class=\"katex\"><span class=\"katex-mathml\"><math><semantics>",
+            "<mrow><mo>(</mo><mn>2</mn><mi>x</mi><mo>+</mo><mn>3</mn><msup><mo>)</mo><mn>5</mn></msup></mrow>",
+            "<annotation encoding=\"application/x-tex\">(2x+3)^5</annotation></semantics></math></span>",
+            "<span class=\"katex-html\" aria-hidden=\"true\"><span class=\"mord\">(2x+3)</span>",
+            "<span class=\"msupsub\">5</span></span></span> with the chain rule, step by step.</p>",
+        ));
+        assert_eq!(text, "Differentiate $(2x+3)^5$ with the chain rule, step by step.");
+    }
+
+    #[test]
+    fn mathml_without_tex_is_read_once() {
+        let text = paragraph_text(
+            "<p>The area is <math><mi>π</mi><msup><mi>r</mi><mn>2</mn></msup></math> for a circle of radius r.</p>",
+        );
+        assert_eq!(text, "The area is πr2 for a circle of radius r.");
+    }
+
+    #[test]
+    fn aria_hidden_text_inside_a_paragraph_is_dropped() {
+        let text = paragraph_text(
+            "<p>Visible words <span aria-hidden=\"true\">decoration</span>that make up a full sentence.</p>",
+        );
+        assert_eq!(text, "Visible words that make up a full sentence.");
+    }
+
+    #[test]
+    fn tex_backslashes_survive_into_plain_text() {
+        // CommonMark only lets a backslash escape ASCII punctuation, so `\f` is literal.
+        assert_eq!(strip_markdown(r"$\frac{a}{b}$ and \[1\]"), r"$\frac{a}{b}$ and [1]");
     }
 
     #[test]
