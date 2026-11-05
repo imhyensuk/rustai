@@ -442,7 +442,7 @@ impl Fetcher {
 
         let charset = content_type.as_deref().and_then(charset_of);
         let bytes = self.read_capped(url, resp).await?;
-        let body = decode(&bytes, charset.as_deref());
+        let body = decode(&bytes, charset.as_deref(), tld_of(&final_url).as_deref());
 
         Ok(Page {
             url: url.to_string(),
@@ -677,19 +677,39 @@ fn charset_of(content_type: &str) -> Option<String> {
         .next()
 }
 
-/// Decode a body, trusting the header, then a `<meta charset>`, then UTF-8.
+/// Decode a body, trusting the header, then a `<meta charset>`, then UTF-8,
+/// and only when the bytes are not UTF-8 either, a guess.
 ///
 /// Legacy encodings are still common outside the anglosphere — EUC-KR and
 /// Shift_JIS in particular — and mojibake destroys every downstream heuristic,
-/// so this is worth getting right rather than assuming UTF-8.
-fn decode(bytes: &[u8], header_charset: Option<&str>) -> String {
+/// so this is worth getting right rather than assuming UTF-8. Old pages often
+/// declare nothing at all (math.snu.ac.kr serves EUC-KR that way), so the last
+/// step is the detector Firefox uses, hinted with the host's top-level domain
+/// the way a browser is.
+fn decode(bytes: &[u8], header_charset: Option<&str>, tld: Option<&str>) -> String {
     let label = header_charset.map(str::to_string).or_else(|| sniff_meta_charset(bytes));
     let encoding = label
         .as_deref()
         .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
-        .unwrap_or(encoding_rs::UTF_8);
+        .unwrap_or_else(|| {
+            // A capped body can end inside a multi-byte character; up to three
+            // trailing bytes of invalid UTF-8 are a cut, not another encoding.
+            if bytes.len() - encoding_rs::Encoding::utf8_valid_up_to(bytes) <= 3 {
+                encoding_rs::UTF_8
+            } else {
+                let mut detector = chardetng::EncodingDetector::new();
+                detector.feed(bytes, true);
+                detector.guess(tld.map(str::as_bytes), true)
+            }
+        });
     let (text, _, _) = encoding.decode(bytes);
     text.into_owned()
+}
+
+/// The last label of a URL's host — the hint the encoding detector takes.
+fn tld_of(url: &str) -> Option<String> {
+    let host = Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    host.rsplit('.').next().map(str::to_string)
 }
 
 /// Look for `<meta charset=...>` in the first 4 KiB, as browsers do.
@@ -841,11 +861,43 @@ mod tests {
     #[test]
     fn decodes_legacy_korean_encoding() {
         let (bytes, _, _) = encoding_rs::EUC_KR.encode("한글 인코딩");
-        assert_eq!(decode(&bytes, Some("euc-kr")), "한글 인코딩");
+        assert_eq!(decode(&bytes, Some("euc-kr"), None), "한글 인코딩");
         // Without the header, the meta tag is the fallback.
         let mut doc = b"<html><head><meta charset=\"euc-kr\"></head><body>".to_vec();
         doc.extend_from_slice(&bytes);
-        assert!(decode(&doc, None).contains("한글 인코딩"));
+        assert!(decode(&doc, None, None).contains("한글 인코딩"));
+    }
+
+    #[test]
+    fn guesses_a_legacy_encoding_that_nothing_declares() {
+        // math.snu.ac.kr serves EUC-KR with neither a header charset nor a meta tag.
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode(concat!(
+            "<html><head><title>합성함수 미분법 = 연쇄법칙(Chain Rule)</title></head><body>",
+            "<p>함수 y = f(x) 와 함수 z = g(y)를 합성한 함수의 미분법은 다음과 같다.</p></body></html>",
+        ));
+        assert!(decode(&bytes, None, Some("kr")).contains("합성함수 미분법 = 연쇄법칙"));
+    }
+
+    #[test]
+    fn undeclared_utf8_stays_utf8() {
+        assert_eq!(
+            decode("<p>한글 UTF-8 본문</p>".as_bytes(), None, Some("kr")),
+            "<p>한글 UTF-8 본문</p>"
+        );
+    }
+
+    #[test]
+    fn a_body_cut_mid_character_is_still_read_as_utf8() {
+        // The body cap can stop a fetch inside a multi-byte character.
+        let full = "<p>가나다라마바사</p>".repeat(20);
+        let cut = &full.as_bytes()[..full.len() - 7];
+        assert!(decode(cut, None, Some("kr")).starts_with("<p>가나다라마바사</p>"));
+    }
+
+    #[test]
+    fn tld_is_the_last_host_label() {
+        assert_eq!(tld_of("https://www.math.snu.ac.kr/a.htm").as_deref(), Some("kr"));
+        assert_eq!(tld_of("not a url"), None);
     }
 
     #[test]

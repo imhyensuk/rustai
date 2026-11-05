@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A formula is read once, as its TeX source.** KaTeX writes every formula
+  three times: MathML for screen readers, the TeX source in an `<annotation>`,
+  and an `aria-hidden` copy to look at. Inline rendering never asked whether a
+  node was hidden, so all three reached the text, and `(2x+3)^5` came out as
+  `(2x+3)5(2x+3)^5(2x+3)5`. Hidden nodes are now dropped inline the same way
+  the denoiser drops them as blocks, and `<math>` renders as `$…$` from its TeX
+  annotation, or once from its MathML text when there is none. The exponent
+  survives, which the flattened MathML text alone loses.
+- **Pages that declare no encoding are no longer read as UTF-8 regardless.**
+  Old sites often send neither a header charset nor a `<meta charset>`;
+  math.snu.ac.kr serves EUC-KR that way and its titles came out as mojibake.
+  When nothing is declared and the body is not UTF-8, the encoding is now
+  guessed with `chardetng`, the detector Firefox uses, hinted with the host's
+  top-level domain as a browser is. A body cut mid-character by the size cap is
+  still treated as UTF-8.
+- **TeX backslashes survive into `Unit.text`.** Stripping Markdown treated
+  every backslash as an escape, so `\frac` became `frac`. Only ASCII
+  punctuation is escapable in CommonMark, and only that is unescaped now.
+
 ## [0.3.0] — 2026-09-07
 
 ### Added
