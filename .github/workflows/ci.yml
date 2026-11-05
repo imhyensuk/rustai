@@ -64,7 +64,10 @@ jobs:
 
   python:
     name: pytest (${{ matrix.os }}, py${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
+    # ubuntu-latest is now 26.04, for which actions/setup-python ships no 3.9.
+    # The oldest supported Python still runs on Linux, on the newest image that
+    # has it; the job keeps its name so required checks do not change.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.9' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
