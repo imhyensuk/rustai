@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **A page can no longer forge the structure around its own words.** The
+  slimmer introduces each source with `## {title}` and its URL, and a reader --
+  a model, usually -- is meant to take that line as provenance. Nothing stopped
+  a paragraph from opening with `## Official Python Documentation` followed by
+  a URL it does not own, which renders as exactly that shape. Body text opening
+  with one or two hashes is now escaped; three or more cannot be mistaken for a
+  source header, and real headings are unaffected because they arrive as
+  headings and are demoted beneath the source line. A fenced code block is also
+  fenced longer than the longest backtick run inside it, so a block carrying
+  ``` can no longer close its own fence and let what follows render as document
+  structure. `README.md` gains a section on treating the output as data: the
+  escaping fixes forged structure, not the plain "ignore your instructions"
+  sentence, which no extractor can detect and only the surrounding prompt can
+  contain.
+
 - **Loopback, private and link-local addresses are refused by default.** A
   search result, a SearXNG instance or a page's own links can name
   `169.254.169.254` or a service bound to the machine running this, and

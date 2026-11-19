@@ -692,6 +692,54 @@ datacenter IP reputation and behaviour, not on the ClientHello. A fingerprint is
 necessary, not sufficient; `proxies` is the knob that addresses the rest, and
 some sites you simply should not be scraping.
 
+## What comes back is untrusted
+
+Everything this library returns was written by whoever owns the page. That is
+the whole point, and it is also the thing to design around.
+
+**The output is data, not instructions.** `result.markdown` is built to be
+pasted into a prompt, and a page is free to fill it with "ignore your previous
+instructions". No extractor can tell you which sentences were written in good
+faith, so the defence is structural: put retrieved context behind a delimiter,
+tell the model in its system prompt that everything inside is reference
+material rather than direction, and never let a tool call be authorised by
+something that arrived in it.
+
+```python
+prompt = f"<context>\n{result.markdown}\n</context>\n\nQuestion: {question}"
+```
+
+What the library does do is stop a page forging the *structure* around its own
+words. Each source is introduced with `## {title}` and its URL, so body text
+opening with one or two hashes is escaped — otherwise a page could write
+`## Official Python Documentation` above a URL it does not own and have it read
+as a second source. A page's real headings are demoted beneath the source line,
+and a code block is fenced longer than any backtick run inside it, so it cannot
+close its own fence and let what follows render as document structure.
+
+**Internal addresses are refused.** A search result, a SearXNG instance you
+point at, or a link you feed back in can name `169.254.169.254` or a service
+bound to the machine running the crawl — and the response would come back
+extracted into a context window headed for a model. Loopback, private,
+link-local and `.internal` targets are rejected, on the first request and on
+every redirect hop. To crawl your own development server:
+
+```python
+client = rustai.Client(allow_private_hosts=True)
+```
+
+A hostname that *resolves* to a private address still passes; closing that
+needs the resolved IP pinned at connect time, which this does not do yet.
+
+**The headless-Chrome fallback keeps its sandbox.** It renders JavaScript from
+pages you have no reason to trust, so the Chrome sandbox stays on. Set
+`RUSTAI_CHROME_NO_SANDBOX=1` only where the kernel refuses it anyway — root
+inside a container.
+
+**Cookies are credentials.** A `cookie_file` holds session and clearance
+cookies and is written `0600`. Proxy URLs can carry `user:pass@`; those are
+masked in `Debug` output, but they are still in your process and your config.
+
 ## Benchmarks
 
 Five, because they measure different things and only one of them is about speed.
