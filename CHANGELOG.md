@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`robots.txt` is read from the right port.** The file was fetched from the
+  URL's scheme and host with the port dropped, so a site served on anything but
+  the default port had port 80's `robots.txt` requested instead. When nothing
+  answered there -- the usual case -- the miss was read as "allow all", which
+  silently disabled `robots.txt` for that host altogether. The per-host cache
+  had the same hole, so two ports on one host shared an entry. Both are keyed
+  by origin now, which is the scope RFC 9309 actually defines.
+
 ### Security
 
 - **Dependencies are scanned for advisories, and the ones that were already

@@ -542,8 +542,7 @@ impl Fetcher {
     /// A missing or unreadable file is treated as "allow all", which is what
     /// the RFC specifies for a 404.
     async fn robots_for(&self, url: &Url) -> Arc<Robots> {
-        let host = url.host_str().unwrap_or_default().to_string();
-        let key = format!("{}://{host}", url.scheme());
+        let key = robots_origin(url);
         if let Some(cached) = self.robots.lock().await.get(&key) {
             return cached.clone();
         }
@@ -792,6 +791,17 @@ fn is_internal(url: &Url) -> bool {
         }
         None => false,
     }
+}
+
+/// The origin whose `robots.txt` governs `url`, as a cache key and a base.
+///
+/// RFC 9309 scopes the file to an origin, so the port is part of it:
+/// `example.com:8080` has its own `robots.txt` and deserves its own cache
+/// entry. Keying on scheme and host alone fetched port 80's file for every
+/// non-default port, and when nothing answered there the miss read as "allow
+/// all" -- which silently disabled `robots.txt` for those hosts entirely.
+fn robots_origin(url: &Url) -> String {
+    url.origin().ascii_serialization()
 }
 
 /// Reject anything that is not an absolute http(s) URL.
@@ -1151,6 +1161,22 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "cookie jar left at {mode:o}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn robots_is_scoped_to_an_origin_including_its_port() {
+        let key = |u: &str| robots_origin(&Url::parse(u).unwrap());
+        // The port belongs in the key. Without it a non-default port fetched
+        // port 80's file, found nothing, and read the miss as "allow all".
+        assert_eq!(key("http://example.com:8080/a/b"), "http://example.com:8080");
+        assert_ne!(key("http://example.com:8080/a"), key("http://example.com:9090/a"));
+        // A default port is not spelled out, so it shares one entry with a
+        // URL that omits it -- which is the same origin.
+        assert_eq!(key("https://example.com/a"), "https://example.com");
+        assert_eq!(key("https://example.com:443/a"), key("https://example.com/b"));
+        assert_eq!(key("http://example.com:80/a"), key("http://example.com/b"));
+        // Scheme still separates them.
+        assert_ne!(key("http://example.com/a"), key("https://example.com/a"));
     }
 
     #[test]
