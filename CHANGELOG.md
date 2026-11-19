@@ -6,6 +6,48 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Loopback, private and link-local addresses are refused by default.** A
+  search result, a SearXNG instance or a page's own links can name
+  `169.254.169.254` or a service bound to the machine running this, and
+  whatever comes back is extracted into a context window headed for a model --
+  which turns an ordinary crawl into a way to read the cloud metadata endpoint
+  out loud. The gate sits in `fetch_inner`, so `fetch` and `fetch_api` both
+  carry it, and it runs again on every redirect hop: `wreq` follows a 3xx
+  itself, so a public page answering with `Location: http://169.254.169.254/`
+  would otherwise never pass back through `normalize`. IPv4 and IPv6 literals
+  are both covered, including v4-mapped v6, along with `localhost` and the
+  reserved `.internal` names. Set `allow_private_hosts=True` to crawl your own
+  development server.
+
+- **The headless-Chrome fallback keeps its sandbox.** The browser existed to
+  render pages whose JavaScript we have no reason to trust, and it launched
+  with `--no-sandbox`, which is the one boundary between a renderer exploit and
+  the process running the crawl. The flag is now opt-in through
+  `RUSTAI_CHROME_NO_SANDBOX`, for the case that actually needs it -- root in a
+  container, where the kernel refuses the sandbox anyway.
+
+- **`robots.txt` is read under a cap, like every other body.** It was the one
+  response fetched with `resp.text()` instead of the streaming reader, so a host
+  could answer the very first request of a crawl with an endless file and take
+  the process down before a single page was fetched. It now goes through the
+  same `read_capped` path at 512 KB — Google stops at 500 KB and nothing
+  legitimate approaches it.
+
+- **A persisted cookie jar is created `0600`.** `cookie_file` holds session and
+  Cloudflare clearance cookies, which are credentials; it was written through
+  `fs::write` and landed at whatever the umask allowed, usually world-readable.
+  On Unix the file is now opened with the mode set, rather than chmod'd
+  afterwards, so it is never briefly readable — and an existing jar is replaced
+  rather than reused, since a mode only applies to a file the call creates.
+
+- **Proxy credentials no longer reach a log.** `FetchConfig::proxies` accepts
+  `user:pass@`, and the derived `Debug` printed it verbatim — including through
+  `Fetcher` and `Pipeline`, which dump their config. `Debug` is now hand-written
+  and masks the userinfo, keeping scheme, host and port. It closes with `..`, so
+  a field added later cannot reintroduce the leak.
+
 ## [0.3.1] — 2026-11-05
 
 ### Fixed

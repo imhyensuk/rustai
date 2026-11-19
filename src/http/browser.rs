@@ -29,8 +29,7 @@ static INSTANCE: OnceCell<Arc<Instance>> = OnceCell::const_new();
 async fn instance(launch_timeout: Duration) -> Result<Arc<Instance>> {
     INSTANCE
         .get_or_try_init(|| async {
-            let config = BrowserConfig::builder()
-                .no_sandbox()
+            let mut builder = BrowserConfig::builder()
                 .new_headless_mode()
                 .launch_timeout(launch_timeout)
                 .request_timeout(launch_timeout)
@@ -42,9 +41,18 @@ async fn instance(launch_timeout: Duration) -> Result<Arc<Instance>> {
                     "--disable-extensions",
                     "--blink-settings=imagesEnabled=false",
                     "--mute-audio",
-                ])
-                .build()
-                .map_err(Error::Browser)?;
+                ]);
+
+            // Chrome's sandbox is the boundary between a renderer exploit on a
+            // page we did not write and this process, and this fallback exists
+            // precisely to run untrusted JavaScript. Dropping it is only
+            // defensible where the kernel will refuse it anyway -- root in a
+            // container -- so that case has to ask.
+            if std::env::var_os("RUSTAI_CHROME_NO_SANDBOX").is_some() {
+                builder = builder.no_sandbox();
+            }
+
+            let config = builder.build().map_err(Error::Browser)?;
 
             let (browser, mut handler) =
                 Browser::launch(config).await.map_err(|e| Error::Browser(e.to_string()))?;

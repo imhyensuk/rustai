@@ -36,6 +36,14 @@ pub const DEFAULT_USER_AGENT: &str =
 /// The token we match `robots.txt` groups against.
 pub const ROBOTS_AGENT: &str = "rustai";
 
+/// Hard cap on a `robots.txt`.
+///
+/// Every other body is capped while streaming; this one is fetched before a
+/// crawl can start, so an endless `robots.txt` would be a free way to exhaust
+/// a crawler's memory. Google stops reading at 500 KB and nothing legitimate
+/// comes close.
+const MAX_ROBOTS_BYTES: usize = 512 * 1024;
+
 /// HTML-level redirects followed before giving up.
 ///
 /// Two is enough for the real pattern (a canonicalising stub pointing at the
@@ -94,7 +102,7 @@ impl Impersonate {
 }
 
 /// Everything tunable about fetching.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FetchConfig {
     /// Maximum requests in flight across all hosts.
     pub concurrency: usize,
@@ -133,6 +141,48 @@ pub struct FetchConfig {
     pub max_retry_after: Duration,
     /// File to persist cookies to, so a session survives the process.
     pub cookie_file: Option<std::path::PathBuf>,
+    /// Allow loopback, private and link-local addresses as fetch targets.
+    ///
+    /// Off by default. A search result or a redirect can point at
+    /// `169.254.169.254` or at a service bound to the machine running this,
+    /// and whatever comes back is extracted into a context window destined for
+    /// a model -- which turns an ordinary crawl into a way to read the cloud
+    /// metadata endpoint out loud. Turn it on to crawl your own development
+    /// server.
+    pub allow_private_hosts: bool,
+}
+
+/// Hand-written rather than derived: [`FetchConfig::proxies`] can carry
+/// `user:pass@`, and a derived `Debug` would put those credentials into any log
+/// that dumps a `Fetcher` or a `Pipeline`. Shows the fields worth seeing in a
+/// dump; `..` covers the rest, so a new field cannot reintroduce a leak.
+impl std::fmt::Debug for FetchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchConfig")
+            .field("concurrency", &self.concurrency)
+            .field("timeout", &self.timeout)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("retries", &self.retries)
+            .field("respect_robots", &self.respect_robots)
+            .field("impersonate", &self.impersonate)
+            .field("browser_fallback", &self.browser_fallback)
+            .field("proxies", &self.proxies.iter().map(|p| mask_proxy(p)).collect::<Vec<_>>())
+            .field("cookie_file", &self.cookie_file)
+            .field("allow_private_hosts", &self.allow_private_hosts)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Replace any `user:pass@` in a proxy URL with `***`, keeping scheme, host and
+/// port — which are what a reader actually needs to identify the proxy.
+fn mask_proxy(proxy: &str) -> String {
+    let Ok(mut parsed) = Url::parse(proxy) else { return proxy.to_string() };
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return proxy.to_string();
+    }
+    let _ = parsed.set_username("***");
+    let _ = parsed.set_password(Some("***"));
+    parsed.to_string()
 }
 
 impl Default for FetchConfig {
@@ -154,6 +204,7 @@ impl Default for FetchConfig {
             proxies: Vec::new(),
             max_retry_after: Duration::from_secs(60),
             cookie_file: None,
+            allow_private_hosts: false,
         }
     }
 }
@@ -217,7 +268,7 @@ impl Fetcher {
             let mut builder = wreq::Client::builder()
                 .timeout(cfg.timeout)
                 .connect_timeout(cfg.connect_timeout)
-                .redirect(wreq::redirect::Policy::limited(cfg.max_redirects))
+                .redirect(redirect_policy(cfg.max_redirects, cfg.allow_private_hosts))
                 .pool_max_idle_per_host(cfg.concurrency.min(32))
                 .referer(true)
                 .gzip(true)
@@ -318,6 +369,9 @@ impl Fetcher {
 
     async fn fetch_inner(&self, url: &str, check_robots: bool) -> Result<Page> {
         let parsed = normalize(url)?;
+        if !self.cfg.allow_private_hosts && is_internal(&parsed) {
+            return Err(Error::InvalidUrl(format!("{parsed} is an internal address")));
+        }
         let _permit = self.gate.acquire().await.map_err(|e| Error::Config(e.to_string()))?;
 
         let crawl_delay = if check_robots {
@@ -441,7 +495,7 @@ impl Fetcher {
         }
 
         let charset = content_type.as_deref().and_then(charset_of);
-        let bytes = self.read_capped(url, resp).await?;
+        let bytes = self.read_capped(url, resp, self.cfg.max_body_bytes).await?;
         let body = decode(&bytes, charset.as_deref(), tld_of(&final_url).as_deref());
 
         Ok(Page {
@@ -455,17 +509,14 @@ impl Fetcher {
         })
     }
 
-    /// Read a body, aborting as soon as it crosses the cap.
-    async fn read_capped(&self, url: &Url, resp: wreq::Response) -> Result<Vec<u8>> {
+    /// Read a body, aborting as soon as it crosses `limit`.
+    async fn read_capped(&self, url: &Url, resp: wreq::Response, limit: usize) -> Result<Vec<u8>> {
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| Error::network(url, e))?;
-            if buf.len() + chunk.len() > self.cfg.max_body_bytes {
-                return Err(Error::BodyTooLarge {
-                    url: url.to_string(),
-                    limit: self.cfg.max_body_bytes,
-                });
+            if buf.len() + chunk.len() > limit {
+                return Err(Error::BodyTooLarge { url: url.to_string(), limit });
             }
             buf.extend_from_slice(&chunk);
         }
@@ -484,10 +535,14 @@ impl Fetcher {
         }
         let robots_url = format!("{key}/robots.txt");
         let parsed = match self.client().get(&robots_url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.text().await {
-                Ok(body) => Robots::parse(&body, ROBOTS_AGENT),
-                Err(_) => Robots::allow_all(),
-            },
+            Ok(resp) if resp.status().is_success() => {
+                match self.read_capped(url, resp, MAX_ROBOTS_BYTES).await {
+                    // RFC 9309 says UTF-8; a host that disagrees gets lossy
+                    // decoding rather than an unparsed file.
+                    Ok(bytes) => Robots::parse(&String::from_utf8_lossy(&bytes), ROBOTS_AGENT),
+                    Err(_) => Robots::allow_all(),
+                }
+            }
             _ => Robots::allow_all(),
         };
         let parsed = Arc::new(parsed);
@@ -651,9 +706,77 @@ fn save_jar(jar: &wreq::cookie::Jar, hosts: &[String], path: &std::path::Path) -
     {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(path, json)
-        .map_err(|e| Error::Config(format!("could not write {}: {e}", path.display())))?;
+    // Clearance and session cookies are credentials: on Unix the file is born
+    // 0600 rather than chmod'd afterwards, so it is never briefly world-readable.
+    // `mode` only applies to a file this call creates, hence the unlink first.
+    #[cfg(unix)]
+    let written = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(path);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut f| f.write_all(json.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let written = std::fs::write(path, &json);
+    written.map_err(|e| Error::Config(format!("could not write {}: {e}", path.display())))?;
     Ok(stored.len())
+}
+
+/// The hop limit, plus the same internal-address gate `fetch_inner` applies.
+///
+/// `wreq` follows a 3xx itself, so a public page that answers with
+/// `Location: http://169.254.169.254/...` would reach the metadata service
+/// without the target ever passing back through [`normalize`]. The check has
+/// to run per hop, not once at the start.
+fn redirect_policy(max_redirects: usize, allow_private: bool) -> wreq::redirect::Policy {
+    wreq::redirect::Policy::custom(move |attempt| {
+        let target = attempt.uri.to_string();
+        if !allow_private && Url::parse(&target).is_ok_and(|u| is_internal(&u)) {
+            return attempt.error(format!("refusing a redirect to an internal address: {target}"));
+        }
+        wreq::redirect::Policy::limited(max_redirects).redirect(attempt)
+    })
+}
+
+/// Whether a URL names somewhere only this machine or this network can reach.
+///
+/// ponytail: literal addresses and the reserved private-use names, nothing
+/// more. A public hostname that *resolves* to a private address still passes
+/// -- closing that means pinning the resolved IP on the connector, which is a
+/// custom resolver's worth of code. Upgrade it if this ever fetches URLs from
+/// a fully untrusted source rather than from search results.
+fn is_internal(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
+                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
+                || ip.to_ipv4_mapped().is_some_and(|v4| {
+                    v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                })
+        }
+        // `.internal` is reserved for private use and is where GCP parks its
+        // metadata service; a trailing dot names the same host.
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost") || name.ends_with(".internal")
+        }
+        None => false,
+    }
 }
 
 /// Reject anything that is not an absolute http(s) URL.
@@ -991,6 +1114,101 @@ mod tests {
         // A missing file is a slow start, not an error.
         assert_eq!(load_jar(&dir.join("nope.json")).len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_jar_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rustai-cookie-perms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jar.json");
+
+        // Start from a world-readable file: saving has to replace the mode, not
+        // inherit it, or a jar written once stays exposed for every later save.
+        std::fs::write(&path, "[]").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let jar = wreq::cookie::Jar::default();
+        jar.add("cf_clearance=secret; Path=/", "https://example.com/");
+        save_jar(&jar, &["example.com".to_string()], &path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "cookie jar left at {mode:o}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn internal_addresses_are_recognised() {
+        let internal = [
+            "http://127.0.0.1/",
+            "http://localhost:3000/",
+            "http://sub.localhost/",
+            "http://LOCALHOST./",
+            "http://169.254.169.254/latest/meta-data/", // AWS metadata
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://[::ffff:127.0.0.1]/",
+        ];
+        for u in internal {
+            assert!(is_internal(&Url::parse(u).unwrap()), "{u} should be internal");
+        }
+
+        let public = [
+            "https://example.com/",
+            "https://en.wikipedia.org/wiki/BM25",
+            "http://8.8.8.8/",
+            "http://172.32.0.1/", // just outside 172.16/12
+            "http://[2606:4700::1]/",
+            "https://notlocalhost.com/", // suffix match must not be a substring match
+            "https://internal.example.com/",
+        ];
+        for u in public {
+            assert!(!is_internal(&Url::parse(u).unwrap()), "{u} should be reachable");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetching_an_internal_address_is_refused_before_the_network() {
+        let f = Fetcher::new().unwrap();
+        let err = f.fetch("http://169.254.169.254/latest/meta-data/").await.unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)), "got {err:?}");
+        // `fetch_api` skips robots, not this.
+        assert!(f.fetch_api("http://127.0.0.1:8080/").await.is_err());
+
+        // Opt in and the gate is gone -- the fetch then fails on connection,
+        // which is a different error entirely.
+        let cfg = FetchConfig { allow_private_hosts: true, ..Default::default() };
+        let f = Fetcher::with_config(cfg).unwrap();
+        let err = f.fetch("http://127.0.0.1:9/").await.unwrap_err();
+        assert!(!matches!(err, Error::InvalidUrl(_)), "gate still firing: {err:?}");
+    }
+
+    #[test]
+    fn proxy_credentials_do_not_reach_debug_output() {
+        // `Url` normalises an empty path to `/` on the way out; this string is
+        // only ever displayed, never handed back to the proxy builder.
+        assert_eq!(
+            mask_proxy("http://user:hunter2@proxy.dev:8080"),
+            "http://***:***@proxy.dev:8080/"
+        );
+        // Nothing to hide, nothing rewritten.
+        assert_eq!(mask_proxy("socks5://127.0.0.1:1080"), "socks5://127.0.0.1:1080");
+        assert_eq!(mask_proxy("not a url"), "not a url");
+
+        let cfg = FetchConfig {
+            proxies: vec!["http://bob:s3cr3t@proxy.dev:8080".into()],
+            ..Default::default()
+        };
+        let dumped = format!("{cfg:?}");
+        assert!(!dumped.contains("s3cr3t"), "password leaked: {dumped}");
+        assert!(dumped.contains("proxy.dev"), "host should survive: {dumped}");
     }
 
     #[test]

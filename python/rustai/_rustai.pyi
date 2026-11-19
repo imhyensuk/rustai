@@ -439,6 +439,7 @@ class Client:
         proxies: Sequence[str] | None = None,
         max_retry_after: float = 60.0,
         cookie_file: str | None = None,
+        allow_private_hosts: bool = False,
         max_tokens: int = 2048,
         max_tokens_per_source: int | None = None,
         diversity: float = 0.35,
