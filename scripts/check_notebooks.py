@@ -68,6 +68,7 @@ SAMPLES = {
     "per_host_delay": 0.0, "retries": 0, "max_body_bytes": 1024,
     "accept_language": "en", "browser_fallback": False, "contact_email": None,
     "proxies": None, "max_retry_after": 1.0, "cookie_file": None,
+    "allow_private_hosts": False,
     "max_tokens": 128, "max_tokens_per_source": 64, "diversity": 0.3,
     "include_links": True, "include_images": False, "include_tables": True,
     "index_mode": "auto", "limit": 3, "max_results": 3, "max_sources": 1,
