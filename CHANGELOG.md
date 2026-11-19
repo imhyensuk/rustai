@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **The internal-address refusal now covers every path to the network.** The
+  first version gated the entry point and the HTTP 3xx policy, and missed the
+  third way out: a page that answers 200 with
+  `<meta http-equiv="refresh" content="0;url=http://169.254.169.254/...">`.
+  That hop is followed by a loop inside `fetch_inner` which reaches the network
+  through `get_with_retry`, never passing `normalize` again, so the target was
+  fetched unchecked. The check is a single `guard` now, called by
+  `get_with_retry` and by the headless render as well as at the door, so a path
+  added later cannot quietly skip it.
+
 - **A page can no longer forge the structure around its own words.** The
   slimmer introduces each source with `## {title}` and its URL, and a reader --
   a model, usually -- is meant to take that line as provenance. Nothing stopped

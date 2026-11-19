@@ -367,11 +367,24 @@ impl Fetcher {
         self.fetch_inner(url, false).await
     }
 
+    /// Refuse an address only this machine or this network can reach.
+    ///
+    /// Every path that turns a `Url` into a request calls this, rather than
+    /// the entry point alone: `wreq` follows HTTP 3xx behind our back (handled
+    /// by [`redirect_policy`]), and a `<meta refresh>` is followed by the loop
+    /// in [`Fetcher::fetch_inner`], which reaches the network through
+    /// [`Fetcher::get_with_retry`] without passing [`normalize`] again.
+    fn guard(&self, url: &Url) -> Result<()> {
+        if !self.cfg.allow_private_hosts && is_internal(url) {
+            return Err(Error::InvalidUrl(format!("{url} is an internal address")));
+        }
+        Ok(())
+    }
+
     async fn fetch_inner(&self, url: &str, check_robots: bool) -> Result<Page> {
         let parsed = normalize(url)?;
-        if !self.cfg.allow_private_hosts && is_internal(&parsed) {
-            return Err(Error::InvalidUrl(format!("{parsed} is an internal address")));
-        }
+        // Early, so an internal target costs neither a permit nor a robots fetch.
+        self.guard(&parsed)?;
         let _permit = self.gate.acquire().await.map_err(|e| Error::Config(e.to_string()))?;
 
         let crawl_delay = if check_robots {
@@ -438,6 +451,7 @@ impl Fetcher {
 
     /// One URL, with exponential backoff on retryable failures.
     async fn get_with_retry(&self, url: &Url) -> Result<Page> {
+        self.guard(url)?;
         let mut attempt = 0u32;
         loop {
             match self.get_once(url).await {
@@ -584,6 +598,7 @@ impl Fetcher {
 
     #[cfg(feature = "browser")]
     async fn render(&self, url: &Url) -> Result<String> {
+        self.guard(url)?;
         browser::render(url.as_str(), self.cfg.timeout).await
     }
 
@@ -1188,6 +1203,34 @@ mod tests {
         let f = Fetcher::with_config(cfg).unwrap();
         let err = f.fetch("http://127.0.0.1:9/").await.unwrap_err();
         assert!(!matches!(err, Error::InvalidUrl(_)), "gate still firing: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn every_request_path_shares_one_internal_address_guard() {
+        let f = Fetcher::new().unwrap();
+        let internal = Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
+        // `fetch_inner` gates the entry point, but a `<meta refresh>` hop and a
+        // headless render reach the network through their own calls -- so the
+        // guard lives where they all pass, not only at the door.
+        assert!(f.guard(&internal).is_err());
+        assert!(f.get_with_retry(&internal).await.is_err());
+        assert!(f.guard(&Url::parse("https://example.com/").unwrap()).is_ok());
+
+        let open =
+            Fetcher::with_config(FetchConfig { allow_private_hosts: true, ..Default::default() })
+                .unwrap();
+        assert!(open.guard(&internal).is_ok());
+    }
+
+    #[test]
+    fn a_meta_refresh_to_an_internal_address_is_still_an_internal_address() {
+        // `detect_html_redirect` only vets the scheme; the guard is what stops
+        // the hop, so the two have to agree on what this URL is.
+        let base = Url::parse("https://evil.test/post").unwrap();
+        let body = r#"<!doctype html><meta http-equiv="refresh"
+            content="0;url=http://169.254.169.254/latest/meta-data/">"#;
+        let next = detect_html_redirect(body, &base).expect("redirect should parse");
+        assert!(is_internal(&next), "{next} must be caught by the guard");
     }
 
     #[test]
