@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-20
+
+A security release, and the reason it is `0.4.0` rather than a patch: three
+of the fixes change behaviour a caller may be relying on.
+
+- **Loopback, private and link-local targets are refused.** Anything pointing
+  at the machine running the crawl, or at its network, now fails instead of
+  being fetched — including a hostname that merely *resolves* there. Code that
+  crawls a local development server needs `allow_private_hosts=True`
+  (`FetchConfig { allow_private_hosts: true, .. }` in Rust).
+- **A redirect into a path `robots.txt` disallows is an error.** It used to be
+  followed and returned, because the chain was walked inside `wreq` where no
+  `robots.txt` could be consulted. An HTML `<meta refresh>` stub still ends the
+  chain and returns the stub rather than failing.
+- **`FetchConfig` gained a public field** (`allow_private_hosts`) and its
+  `Debug` is hand-written to mask proxy credentials. A struct literal without
+  `..Default::default()` no longer compiles, and `Debug` output has a different
+  shape — it is not a stable format, but anything parsing it will notice.
+
 ### Fixed
 
 - **A redirect is checked before it is followed.** `wreq` followed 3xx chains

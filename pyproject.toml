@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name            = "rustai"
-version         = "0.3.1"
+version         = "0.4.0"
 description     = "Zero-cost local research pipeline: async search routing, TLS-fingerprint-aware fetching, DOM denoising and BM25 context slimming for local LLMs."
 readme          = "README.md"
 requires-python = ">=3.9"
