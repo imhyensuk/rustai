@@ -728,8 +728,13 @@ every redirect hop. To crawl your own development server:
 client = rustai.Client(allow_private_hosts=True)
 ```
 
-A hostname that *resolves* to a private address still passes; closing that
-needs the resolved IP pinned at connect time, which this does not do yet.
+A hostname that *resolves* inward is caught too, at the moment it is
+resolved: the client's DNS resolver drops internal addresses from every
+answer, and since the connection is made to the addresses the resolver
+returned, the address that was vetted is the address dialled. That closes
+rebinding as well -- there is no second lookup in between to disagree with
+the first. A name that resolves to a mix keeps its public addresses; one
+with nowhere public to go fails to resolve.
 
 **The headless-Chrome fallback keeps its sandbox.** It renders JavaScript from
 pages you have no reason to trust, so the Chrome sandbox stays on. Set

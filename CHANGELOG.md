@@ -30,6 +30,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **A hostname that resolves to an internal address is refused too.** The URL
+  check could only read what the URL said, so `evil.test` with an `A` record
+  pointing at `127.0.0.1` walked straight past it -- and so did a record that
+  flipped inward between the check and the connection, which is DNS rebinding.
+  The client now resolves through a wrapper that drops internal addresses from
+  every answer. `wreq` dials what a resolver returns, so the vetted address is
+  the one used and there is no second lookup to disagree with the first. A name
+  resolving to a mix keeps its public addresses; one with nowhere public to go
+  fails to resolve, which is the truthful answer. `allow_private_hosts` turns
+  the wrapper off along with the URL check.
+
 - **Dependencies are scanned for advisories, and the ones that were already
   open are closed.** Nothing watched the tree, and the first scan found six
   vulnerabilities. Most of them sat on the crawl path: `zstd` and `zstd-safe`

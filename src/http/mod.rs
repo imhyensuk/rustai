@@ -19,12 +19,14 @@ pub mod robots;
 pub mod browser;
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
+use wreq::dns::{Addrs, GaiResolver, Name, Resolve, Resolving};
 
 use crate::error::{Error, Result};
 use robots::Robots;
@@ -276,6 +278,12 @@ impl Fetcher {
                 .brotli(true)
                 .deflate(true)
                 .zstd(true);
+
+            // Literal addresses are already refused by `Fetcher::guard`; this
+            // is the same judgement applied to what a hostname resolves to.
+            if !cfg.allow_private_hosts {
+                builder = builder.dns_resolver(Arc::new(PublicOnlyDns(GaiResolver::new())));
+            }
 
             builder = match &jar {
                 Some(jar) => builder.cookie_provider(jar.clone()),
@@ -772,16 +780,10 @@ enum Hop {
     Redirect(Url),
 }
 
-/// Whether a URL names somewhere only this machine or this network can reach.
-///
-/// ponytail: literal addresses and the reserved private-use names, nothing
-/// more. A public hostname that *resolves* to a private address still passes
-/// -- closing that means pinning the resolved IP on the connector, which is a
-/// custom resolver's worth of code. Upgrade it if this ever fetches URLs from
-/// a fully untrusted source rather than from search results.
-fn is_internal(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => {
+/// Whether an address is one only this machine or this network can reach.
+fn is_internal_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
             ip.is_loopback()
                 || ip.is_private()
                 || ip.is_link_local()
@@ -789,15 +791,25 @@ fn is_internal(url: &Url) -> bool {
                 || ip.is_broadcast()
                 || ip.is_documentation()
         }
-        Some(url::Host::Ipv6(ip)) => {
+        IpAddr::V6(ip) => {
             ip.is_loopback()
                 || ip.is_unspecified()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
                 || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
-                || ip.to_ipv4_mapped().is_some_and(|v4| {
-                    v4.is_loopback() || v4.is_private() || v4.is_link_local()
-                })
+                || ip.to_ipv4_mapped().is_some_and(|v4| is_internal_ip(&IpAddr::V4(v4)))
         }
+    }
+}
+
+/// Whether a URL names somewhere only this machine or this network can reach.
+///
+/// What the URL *says*, which is all that can be judged before resolving it.
+/// A hostname pointing at an internal address is caught by [`PublicOnlyDns`]
+/// instead, at the moment it is resolved.
+fn is_internal(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => is_internal_ip(&IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_internal_ip(&IpAddr::V6(ip)),
         // `.internal` is reserved for private use and is where GCP parks its
         // metadata service; a trailing dot names the same host.
         Some(url::Host::Domain(name)) => {
@@ -805,6 +817,38 @@ fn is_internal(url: &Url) -> bool {
             name == "localhost" || name.ends_with(".localhost") || name.ends_with(".internal")
         }
         None => false,
+    }
+}
+
+/// A resolver that drops internal addresses before anything is dialled.
+///
+/// [`is_internal`] can only read the URL. A public hostname whose record
+/// points at `127.0.0.1` passes it, and so does one whose record flips to an
+/// internal address *after* the check and before the connection -- DNS
+/// rebinding. Filtering here closes both, because `wreq` dials the addresses a
+/// resolver hands back: the address that was vetted is the address used, with
+/// no second lookup in between to disagree with the first.
+///
+/// A name that resolves to a mix keeps its public addresses. One that resolves
+/// only to internal ones fails to resolve at all, which is the truthful answer
+/// -- there is nowhere this is willing to connect.
+///
+/// Generic over the inner resolver so a test can supply the answers rather
+/// than depending on what the network says today.
+struct PublicOnlyDns<R>(R);
+
+impl<R: Resolve + 'static> Resolve for PublicOnlyDns<R> {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        let inner = self.0.resolve(name);
+        Box::pin(async move {
+            let kept: Vec<SocketAddr> =
+                inner.await?.filter(|addr| !is_internal_ip(&addr.ip())).collect();
+            if kept.is_empty() {
+                return Err(format!("{host} resolves only to internal addresses").into());
+            }
+            Ok(Box::new(kept.into_iter()) as Addrs)
+        })
     }
 }
 
@@ -1192,6 +1236,74 @@ mod tests {
         assert_eq!(key("http://example.com:80/a"), key("http://example.com/b"));
         // Scheme still separates them.
         assert_ne!(key("http://example.com/a"), key("https://example.com/a"));
+    }
+
+    /// A resolver that answers with whatever it was built from.
+    struct Fixed(Vec<SocketAddr>);
+
+    impl Resolve for Fixed {
+        fn resolve(&self, _: Name) -> Resolving {
+            let addrs = self.0.clone();
+            Box::pin(async move { Ok(Box::new(addrs.into_iter()) as Addrs) })
+        }
+    }
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().expect("socket addr")
+    }
+
+    #[tokio::test]
+    async fn resolving_drops_internal_addresses() {
+        // The rebinding case: a name that looks public and answers otherwise.
+        // `is_internal` cannot see this, because the URL says nothing wrong.
+        let only_internal = PublicOnlyDns(Fixed(vec![addr("127.0.0.1:80")]));
+        assert!(
+            only_internal.resolve(Name::from("rebind.test")).await.is_err(),
+            "a name with nowhere public to go must not resolve"
+        );
+
+        // A mixed answer keeps the public addresses and loses the rest, so one
+        // poisoned record cannot redirect a connection inward.
+        let mixed = PublicOnlyDns(Fixed(vec![
+            addr("127.0.0.1:80"),
+            addr("93.184.216.34:80"),
+            addr("10.0.0.7:80"),
+            addr("[::1]:80"),
+            addr("[2606:4700::1]:80"),
+        ]));
+        let kept: Vec<SocketAddr> =
+            mixed.resolve(Name::from("mixed.test")).await.expect("resolves").collect();
+        assert_eq!(kept, vec![addr("93.184.216.34:80"), addr("[2606:4700::1]:80")]);
+    }
+
+    #[test]
+    fn internal_ip_ranges_are_recognised() {
+        let internal = [
+            "127.0.0.1",
+            "127.9.9.9",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.1.2.3",
+        ];
+        for ip in internal {
+            let ip: IpAddr = ip.parse().expect(ip);
+            assert!(is_internal_ip(&ip), "{ip} should be internal");
+        }
+
+        let public = ["8.8.8.8", "93.184.216.34", "172.32.0.1", "2606:4700::1", "::ffff:8.8.8.8"];
+        for ip in public {
+            let ip: IpAddr = ip.parse().expect(ip);
+            assert!(!is_internal_ip(&ip), "{ip} should be reachable");
+        }
     }
 
     #[test]
