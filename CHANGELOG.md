@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- **Dependencies are scanned for advisories, and the ones that were already
+  open are closed.** Nothing watched the tree, and the first scan found six
+  vulnerabilities. Most of them sat on the crawl path: `zstd` and `zstd-safe`
+  handle a response body that a server chose, and the advisories against them
+  are use-after-free, double-free, out-of-bounds read and exposed
+  uninitialised memory -- memory-unsafety reachable from a hostile page, in a
+  crate that otherwise contains no `unsafe` of its own. `webpki-root-certs`
+  trusted distrusted emSign intermediates, `time` could be driven to exhaust
+  the stack, and `tokio`'s `AsyncFd` violated I/O safety. All patched by
+  lockfile updates; the minimum supported Rust version is unchanged at 1.98.
+  `.github/workflows/audit.yml` runs `cargo audit --deny warnings` on every
+  push and pull request and weekly on a schedule -- the schedule being the
+  point, since an advisory usually lands against a dependency nobody touched.
+
 - **The internal-address refusal now covers every path to the network.** The
   first version gated the entry point and the HTTP 3xx policy, and missed the
   third way out: a page that answers 200 with
