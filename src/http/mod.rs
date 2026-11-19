@@ -268,7 +268,8 @@ impl Fetcher {
             let mut builder = wreq::Client::builder()
                 .timeout(cfg.timeout)
                 .connect_timeout(cfg.connect_timeout)
-                .redirect(redirect_policy(cfg.max_redirects, cfg.allow_private_hosts))
+                // Followed in `fetch_following` instead: see there for why.
+                .redirect(wreq::redirect::Policy::none())
                 .pool_max_idle_per_host(cfg.concurrency.min(32))
                 .referer(true)
                 .gzip(true)
@@ -381,45 +382,57 @@ impl Fetcher {
         Ok(())
     }
 
+    /// Follow HTTP redirects to a page, checking every hop.
+    ///
+    /// `wreq` is set to [`wreq::redirect::Policy::none`] so the chain is walked
+    /// here instead. All three things owed to a redirect target need `await`
+    /// and so cannot live in a redirect policy, which is a synchronous
+    /// closure: `robots.txt` has to be read for the host the redirect actually
+    /// lands on, the internal-address guard has to see each target, and pacing
+    /// is per-host. Before this, a 3xx to a disallowed path on another host
+    /// was fetched without ever consulting that host's `robots.txt`.
+    async fn fetch_following(&self, start: &Url, check_robots: bool) -> Result<Page> {
+        let mut current = start.clone();
+        for _ in 0..=self.cfg.max_redirects {
+            self.guard(&current)?;
+            let crawl_delay = if check_robots {
+                let robots = self.robots_for(&current).await;
+                if !robots.allows(current.path()) {
+                    return Err(Error::RobotsDenied(current.to_string()));
+                }
+                robots.crawl_delay
+            } else {
+                None
+            };
+            self.pace(&current, crawl_delay).await;
+            match self.get_with_retry(&current).await? {
+                Hop::Page(page) => return Ok(page),
+                Hop::Redirect(next) => current = next,
+            }
+        }
+        Err(Error::network(start, format!("more than {} redirects", self.cfg.max_redirects)))
+    }
+
     async fn fetch_inner(&self, url: &str, check_robots: bool) -> Result<Page> {
         let parsed = normalize(url)?;
         // Early, so an internal target costs neither a permit nor a robots fetch.
         self.guard(&parsed)?;
         let _permit = self.gate.acquire().await.map_err(|e| Error::Config(e.to_string()))?;
 
-        let crawl_delay = if check_robots {
-            let robots = self.robots_for(&parsed).await;
-            if !robots.allows(parsed.path()) {
-                return Err(Error::RobotsDenied(parsed.to_string()));
-            }
-            robots.crawl_delay
-        } else {
-            None
-        };
-        self.pace(&parsed, crawl_delay).await;
-
         let started = Instant::now();
-        let mut page = self.get_with_retry(&parsed).await?;
+        let mut page = self.fetch_following(&parsed, check_robots).await?;
 
-        // Follow HTML-level redirects. `wreq` follows HTTP 3xx, but a stub page
-        // that redirects via `<meta refresh>` or `location.replace` returns a
-        // perfectly good 200 containing no content — which is exactly what
-        // happens on sites that canonicalise URLs in the browser.
+        // HTML-level redirects. A stub that redirects via `<meta refresh>` or
+        // `location.replace` returns a perfectly good 200 containing no
+        // content -- which is what sites that canonicalise in the browser do.
         let mut current = parsed.clone();
         for _ in 0..MAX_HTML_REDIRECTS {
             let Some(next) = detect_html_redirect(&page.body, &current) else { break };
-            if check_robots && !self.robots_for(&next).await.allows(next.path()) {
-                break;
-            }
-            self.pace(&next, crawl_delay).await;
-            match self.get_with_retry(&next).await {
-                Ok(followed) => {
-                    page = followed;
-                    current = next;
-                }
-                // The stub is still a better answer than an error.
-                Err(_) => break,
-            }
+            // The stub is still a better answer than an error, so a refused or
+            // disallowed target ends the chain rather than failing the fetch.
+            let Ok(followed) = self.fetch_following(&next, check_robots).await else { break };
+            page = followed;
+            current = next;
         }
         page.url = parsed.to_string();
         page.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -450,7 +463,7 @@ impl Fetcher {
     }
 
     /// One URL, with exponential backoff on retryable failures.
-    async fn get_with_retry(&self, url: &Url) -> Result<Page> {
+    async fn get_with_retry(&self, url: &Url) -> Result<Hop> {
         self.guard(url)?;
         let mut attempt = 0u32;
         loop {
@@ -475,7 +488,7 @@ impl Fetcher {
         }
     }
 
-    async fn get_once(&self, url: &Url) -> Result<Page> {
+    async fn get_once(&self, url: &Url) -> Result<Hop> {
         let resp =
             self.client().get(url.as_str()).send().await.map_err(|e| Error::network(url, e))?;
 
@@ -487,6 +500,18 @@ impl Fetcher {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
 
+        // `Policy::none()` hands the 3xx back rather than following it. A
+        // redirect with no usable target is just a failed request.
+        if (300..400).contains(&status)
+            && let Some(next) = resp
+                .headers()
+                .get(wreq::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|l| url.join(l).ok())
+                .filter(|next| matches!(next.scheme(), "http" | "https"))
+        {
+            return Ok(Hop::Redirect(next));
+        }
         if !(200..300).contains(&status) {
             let retry_after = resp
                 .headers()
@@ -512,7 +537,7 @@ impl Fetcher {
         let bytes = self.read_capped(url, resp, self.cfg.max_body_bytes).await?;
         let body = decode(&bytes, charset.as_deref(), tld_of(&final_url).as_deref());
 
-        Ok(Page {
+        Ok(Hop::Page(Page {
             url: url.to_string(),
             final_url,
             status,
@@ -520,7 +545,7 @@ impl Fetcher {
             body,
             elapsed_ms: 0,
             rendered: false,
-        })
+        }))
     }
 
     /// Read a body, aborting as soon as it crosses `limit`.
@@ -741,20 +766,10 @@ fn save_jar(jar: &wreq::cookie::Jar, hosts: &[String], path: &std::path::Path) -
     Ok(stored.len())
 }
 
-/// The hop limit, plus the same internal-address gate `fetch_inner` applies.
-///
-/// `wreq` follows a 3xx itself, so a public page that answers with
-/// `Location: http://169.254.169.254/...` would reach the metadata service
-/// without the target ever passing back through [`normalize`]. The check has
-/// to run per hop, not once at the start.
-fn redirect_policy(max_redirects: usize, allow_private: bool) -> wreq::redirect::Policy {
-    wreq::redirect::Policy::custom(move |attempt| {
-        let target = attempt.uri.to_string();
-        if !allow_private && Url::parse(&target).is_ok_and(|u| is_internal(&u)) {
-            return attempt.error(format!("refusing a redirect to an internal address: {target}"));
-        }
-        wreq::redirect::Policy::limited(max_redirects).redirect(attempt)
-    })
+/// What one request produced: the page, or a redirect still to follow.
+enum Hop {
+    Page(Page),
+    Redirect(Url),
 }
 
 /// Whether a URL names somewhere only this machine or this network can reach.

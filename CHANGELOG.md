@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A redirect is checked before it is followed.** `wreq` followed 3xx chains
+  itself, so a redirect to another host was fetched without that host's
+  `robots.txt` ever being consulted, and without per-host pacing. All three
+  things owed to a redirect target need `await`, which a redirect policy --
+  a synchronous closure -- cannot do, so the chain is walked in
+  `fetch_following` instead, with the client set to `Policy::none()`. Every
+  hop now gets the `robots.txt` of the host it lands on, the internal-address
+  guard, and the host's own delay; `max_redirects` bounds the walk as before.
+  A redirect to a path `robots.txt` disallows is an error rather than a
+  silently fetched page -- for an HTML `<meta refresh>` stub it still ends the
+  chain and returns the stub, which is the better answer there.
+
 - **`robots.txt` is read from the right port.** The file was fetched from the
   URL's scheme and host with the port dropped, so a site served on anything but
   the default port had port 80's `robots.txt` requested instead. When nothing
